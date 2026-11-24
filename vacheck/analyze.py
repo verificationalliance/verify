@@ -136,12 +136,13 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         if rel in hashes:
             continue
         if target is not None:                     # a symlink counts by where it points, never followed
-            raw = target.encode('utf-8', errors='surrogateescape')
-            hashes[rel], size, data = _sha256(b'symlink\0' + raw), len(raw), None
+            size, data = len(target.encode('utf-8', errors='surrogateescape')), None
             if size > MAX_TOTAL - total:
                 raise AnalysisError('the build inputs (every file in the checkout and the manifest) are larger than 512 MiB in total')
+            hashes[rel] = [rel, 'link', target]
         else:
-            hashes[rel], size, data = _hash(path, rel, MAX_TOTAL - total, _read_as_text(rel, prefix))
+            sha, size, data, mode = _hash(path, rel, MAX_TOTAL - total, _read_as_text(rel, prefix))
+            hashes[rel] = [rel, 'file', mode, sha]
         total += size
         if data is None:
             continue
@@ -156,8 +157,9 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
                 if len(replaced) == MAX_REPLACED:
                     raise AnalysisError('more than %d lines use implemented_by, extern or csimp' % MAX_REPLACED)
                 replaced.append({'path': rel, 'line': i, 'text': _visible(raw).strip()[:MAX_LINE_TEXT]})
-    # The digest of the JSON array of [path, sha256 of the file] pairs, sorted.
-    build_digest = _sha256(json.dumps(sorted(hashes.items()), separators=(',', ':')).encode())
+    # The digest of the JSON array of typed entries, sorted by path: [path, "file", git mode, sha256 of
+    # the file] (mode 100755 when its owner may run it, else 100644) and [path, "link", target].
+    build_digest = _sha256(json.dumps(sorted(hashes.values()), separators=(',', ':')).encode())
 
     def source(name):
         """Where the source declares `name`: the one declaration whose full name, from the namespaces
@@ -224,7 +226,7 @@ def import_roots(source_dir, project):
     for rel, path, target in _build_inputs(source_dir, prefix):
         if target is not None or not _read_as_text(rel, prefix):
             continue
-        _, size, data = _hash(path, rel, MAX_TOTAL - total, True)
+        _, size, data, _ = _hash(path, rel, MAX_TOTAL - total, True)
         total += size
         if data is not None:
             for m in _IMPORT.finditer(data.decode('utf-8', errors='replace')):
@@ -265,7 +267,7 @@ _NAME = r'(?:[^\s«(){}\[\]:⦃,]|«[^»\n]*»)+'
 _ATTRS = r'(?:@\[[^\]\n]*\][^\S\n]*)*'
 _MODIFIERS = r'(?:(?:private|protected|public|noncomputable|nonrec|unsafe|partial|scoped|local)[^\S\n]+)*'
 _WORD_END = r'(?![^\s(])'
-# A command at the start of a line: namespace, section, mutual, end, #exit, or a declaration after any
+# A command at the start of a line: namespace, section, mutual, end, or a declaration after any
 # attributes and modifiers. No two ways to match the same text, so a hostile file cannot make it
 # backtrack.
 _COMMAND = re.compile(
@@ -274,23 +276,24 @@ _COMMAND = re.compile(
     r'|' + _ATTRS + _MODIFIERS + r'(?P<section>section)(?:[^\S\n]+(?P<section_name>' + _NAME + '))?' + _WORD_END +
     r'|(?P<mutual>mutual)' + _WORD_END +
     r'|(?P<end>end)(?:[^\S\n]+(?P<end_name>' + _NAME + '))?' + _WORD_END +
-    r'|(?P<exit>#exit)' + _WORD_END +
     r'|' + _ATTRS + r'(?P<modifiers>' + _MODIFIERS + ')'
     r'(?:theorem|lemma|def|abbrev|structure|inductive|class(?:[^\S\n]+inductive)?|opaque|axiom|instance)'
     r'[^\S\n]+(?P<declared>' + _NAME + '))', re.MULTILINE)
 
 
 def _mask(text):
-    """The text with its comments (nested /- -/ too), strings, raw strings and character literals
-    blanked out, line breaks kept; «» names are kept as they are."""
+    """(masked, first): the text with its comments (nested /- -/ too), strings, raw strings and
+    character literals blanked out, line breaks kept, «» names kept as they are; and where the first
+    « with no » on its line is (len(text) when there is none)."""
     out = []
     i, n = 0, len(text)
+    first = n
     unclosed = -1  # up to here, a « has no » on its line, and nor has any after it on that line
     while True:
         m = _SPECIAL.search(text, i)
         if m is None:
             out.append(text[i:])
-            return ''.join(out)
+            return ''.join(out), first
         start = m.start()
         out.append(text[i:start])
         token = m.group()
@@ -304,6 +307,7 @@ def _mask(text):
             end = text.find('»', start + 1, newline)
             if end < 0:
                 unclosed = newline
+                first = min(first, start)
                 out.append(token)
                 i = start + 1
                 continue
@@ -369,8 +373,12 @@ def declarations(text):
     namespaces open around it: `theorem b` inside `namespace A` is A.b, and `_root_.b` is b. A
     private declaration is left out (Lean gives it another name). From an `end` that closes nothing,
     or not what is open, on, nothing more is found in the file: its names are not certain; nor after
-    `#exit`, after which Lean reads nothing."""
-    masked = _mask(text)
+    `#exit` (anywhere outside comments and strings: Lean stops at `end A #exit` too, and at `x#exit`),
+    after which Lean reads nothing, nor after a « with no » on its line. Stopping early costs only a
+    link that is then null."""
+    masked, unclosed = _mask(text)
+    stop = masked.find('#exit')
+    masked = masked[:min(unclosed, stop if stop >= 0 else len(masked))]
     scopes = []  # (kind, name): ('namespace', components), ('section', text or None), ('mutual', None)
     out = []
     line, pos = 1, 0
@@ -386,8 +394,6 @@ def declarations(text):
             scopes.append(('section', m.group('section_name')))
         elif m.group('mutual') is not None:
             scopes.append(('mutual', None))
-        elif m.group('exit') is not None:          # Lean reads nothing after it: what follows was never built
-            return out
         elif m.group('end') is not None:
             name = m.group('end_name')
             closes = scopes[-1] if scopes else None
@@ -607,10 +613,8 @@ def _build_inputs(source_dir, prefix):
     `link` is None for a file. A project folder that holds .lake raises: Lake builds there, so a
     committed one could hand the build files that are not hashed.
 
-    Symlinks are never followed. In the project folder, and for a .lean or Lake file anywhere, a
-    symlinked file or folder raises: what it points at could be compiled. Elsewhere a symlink counts
-    by where it points (`link`, its target as written), which must be inside the checkout, outside
-    .git; one pointing anywhere else raises, since what it points at is not hashed."""
+    Symlinks are never followed, and are checked by their real path (see _link): a symlink counts by
+    its target as written (`link`), and only a symlink to a file of the checkout may stand."""
     lake = _join(prefix, '.lake')
     if os.path.lexists(os.path.join(source_dir, *lake.split('/'))):
         raise AnalysisError('%s is in the repository: Lake builds there, so it must not be committed '
@@ -620,25 +624,10 @@ def _build_inputs(source_dir, prefix):
     def fail(e):
         raise AnalysisError('cannot list %s' % os.path.relpath(e.filename or source_dir, source_dir))
 
-    def link(rel, path, compiled):
-        """The target of a symlink that may stand as a build input; AnalysisError for any other."""
-        if compiled:
-            raise AnalysisError(_SYMLINK + rel)
-        try:
-            target = os.readlink(path)
-        except OSError:
-            raise AnalysisError('cannot read %s' % rel) from None
-        where = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target.replace(os.sep, '/')))
-        if (os.path.isabs(target) or where == '..' or where.startswith('../') or where == '.git'
-                or where.startswith('.git/')):
-            raise AnalysisError('a symlink points outside the repository: %s' % rel)
-        return target
-
     out = []
     for dirpath, dirnames, filenames in os.walk(source_dir, onerror=fail):
         here = os.path.relpath(dirpath, source_dir)
         here = '' if here == os.curdir else here.replace(os.sep, '/')
-        in_project = not prefix or here == prefix or here.startswith(prefix + '/')
         kept = []
         for d in dirnames:
             rel = _join(here, d)
@@ -646,30 +635,63 @@ def _build_inputs(source_dir, prefix):
                 continue
             path = os.path.join(dirpath, d)
             if os.path.islink(path):
-                out.append((rel, path, link(rel, path, in_project or rel == prefix)))
-                continue
+                _link(source_dir, rel, path, prefix)       # raises for every folder: why, if it can tell
+                raise AnalysisError('a symlink to a folder: %s' % rel)
             kept.append(d)
         dirnames[:] = kept
         for name in filenames:
             rel = _join(here, name)
             path = os.path.join(dirpath, name)
             if os.path.islink(path):
-                out.append((rel, path, link(rel, path, in_project or name.endswith('.lean') or name in LAKE_FILES)))
+                out.append((rel, path, _link(source_dir, rel, path, prefix)))
             else:
                 out.append((rel, path, None))
     out.sort()
     return out
 
 
+def _link(source_dir, rel, path, prefix):
+    """The target, as written, of a symlink that may stand as a build input: outside the project folder,
+    neither a .lean nor a Lake file, and to an existing regular file of the checkout, outside .git, by
+    its real path, which must be the checkout's real path joined with where the target reads. Anything
+    else raises: what it points at could be compiled, or is not what the digest hashes (a folder
+    symlink on the way, `up -> .`, makes ../../up/../core/x read as core/x and be ../core/x)."""
+    name = rel.rsplit('/', 1)[-1]
+    if not prefix or rel == prefix or rel.startswith(prefix + '/') or name.endswith('.lean') or name in LAKE_FILES:
+        raise AnalysisError(_SYMLINK + rel)
+    try:
+        target = os.readlink(path)
+    except OSError:
+        raise AnalysisError('cannot read %s' % rel) from None
+    root, real = os.path.realpath(source_dir), os.path.realpath(path)
+    inside = os.path.relpath(real, root).replace(os.sep, '/')
+    if os.path.isabs(target) or inside == '..' or inside.startswith('../'):
+        raise AnalysisError('a symlink points outside the repository: %s' % rel)
+    if inside == '.git' or inside.startswith('.git/'):
+        raise AnalysisError('a symlink points into .git: %s' % rel)
+    if os.path.isdir(real):
+        raise AnalysisError('a symlink to a folder: %s' % rel)
+    if not os.path.lexists(real):
+        raise AnalysisError('a symlink points at nothing: %s' % rel)
+    reads = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target.replace(os.sep, '/')))
+    if reads != inside:
+        raise AnalysisError('a symlink points outside the repository: %s' % rel)
+    if not stat.S_ISREG(os.stat(path).st_mode):
+        raise AnalysisError('a symlink to something that is not a regular file: %s' % rel)
+    return target
+
+
 def _hash(path, rel, budget, as_text):
-    """(sha256, size, text) of a regular file, read in chunks and never through a symlink. `text` is
-    its bytes if as_text and it is at most 2 MiB, else None. More than `budget` bytes raises."""
+    """(sha256, size, text, mode) of a regular file, read in chunks and never through a symlink. `text`
+    is its bytes if as_text and it is at most 2 MiB, else None; `mode` its git mode, 100755 when its
+    owner may run it, else 100644. More than `budget` bytes raises."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as e:
         raise AnalysisError(_SYMLINK + rel if e.errno == errno.ELOOP else 'cannot read %s' % rel) from None
     with os.fdopen(fd, 'rb') as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
             raise AnalysisError('%s is not a regular file' % rel)
         h = hashlib.sha256()
         size = 0
@@ -687,7 +709,8 @@ def _hash(path, rel, budget, as_text):
                 text.append(chunk)
             else:
                 text = None
-    return h.hexdigest(), size, None if text is None else b''.join(text)
+    return (h.hexdigest(), size, None if text is None else b''.join(text),
+            '100755' if st.st_mode & stat.S_IXUSR else '100644')
 
 
 def _plain_path(rel):

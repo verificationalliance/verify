@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -904,6 +905,46 @@ check('a lean file of 2 MiB is read', attempt(lambda: big_file(MB2))
       == (None, [{'path': 'core/A.lean', 'line': 3, 'text': '@[extern "x"] opaque y : Nat'}], True))
 
 
+def entries_digest():
+    """The build digest is the sha256 of the JSON list of typed entries, sorted by path: [path, "file", mode, sha256] with
+    the git mode (100755 when executable) and [path, "link", target]; checked against a digest built here."""
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    write(os.path.join(root, 'core', 'ffi', 'shim.c'), 'int x;\n'); write(os.path.join(root, 'core', 'run.sh'), 'echo\n')
+    os.chmod(os.path.join(root, 'core', 'run.sh'), 0o755)
+    os.makedirs(os.path.join(root, 'app')); os.symlink('../core/ffi/shim.c', os.path.join(root, 'app', 'shim.c'))
+    got = run('good', tree=(root, manifest))['build_digest']
+    want = []
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            p = os.path.join(d, f); rel = os.path.relpath(p, root).replace(os.sep, '/')
+            if os.path.islink(p): want.append([rel, 'link', os.readlink(p)])
+            else:
+                with open(p, 'rb') as fh: sha = hashlib.sha256(fh.read()).hexdigest()
+                want.append([rel, 'file', '100755' if os.stat(p).st_mode & 0o100 else '100644', sha])
+    want.sort()
+    return got == hashlib.sha256(json.dumps(want, separators=(',', ':')).encode()).hexdigest()
+
+
+def link_or_file():
+    """A symlink and a file holding what the old digest hashed for it no longer give the same digest; nor does a script with
+    and without its exec bit."""
+    out = []
+    for make in ('link', 'file', 'exec'):
+        root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+        write(os.path.join(root, 'core', 'ffi', 'shim.c'), 'int x;\n'); os.makedirs(os.path.join(root, 'app'))
+        if make == 'link': os.symlink('../core/ffi/shim.c', os.path.join(root, 'app', 'shim.c'))
+        else:
+            with open(os.path.join(root, 'app', 'shim.c'), 'wb') as f: f.write(b'symlink\0../core/ffi/shim.c')
+            if make == 'exec': os.chmod(os.path.join(root, 'app', 'shim.c'), 0o755)
+        out.append(run('good', tree=(root, manifest))['build_digest'])
+    return len(set(out)) == 3
+
+
+check('the build digest is the sha256 of typed entries: [path, "file", mode, sha256] and [path, "link", target]',
+      attempt(entries_digest) is True)
+check('a symlink, a file holding the same bytes, and that file executable give three digests', attempt(link_or_file) is True)
+
+
 def total_cap(slack):
     """analyze with the cap on the bytes hashed set to the good tree's inputs plus `slack`."""
     tree = source_tree('good', [('x', 'Good.t1', 'model')])
@@ -965,12 +1006,51 @@ def inside_symlink():
     out.append(run('good', tree=tree)['build_digest'])
     os.remove(os.path.join(root, 'app', 'src', 'shim.c')); os.symlink('../../core/ffi/other.c', os.path.join(root, 'app', 'src', 'shim.c'))
     out.append(run('good', tree=tree)['build_digest'])
-    os.symlink('../core/ffi', os.path.join(root, 'app', 'ffi'))              # a folder: its link counts, its files once, where they are
-    out.append(run('good', tree=tree)['build_digest'])
-    return len(set(out)) == 4
+    return len(set(out)) == 3
 
 
-check('a symlink outside the project into the checkout counts by its target, never followed', attempt(inside_symlink) is True)
+check('a symlink outside the project to a file in the checkout counts by its target, never followed', attempt(inside_symlink) is True)
+
+
+def escape(links, files=(), rel=None):
+    """analyze's AnalysisError on a good tree with these symlinks (path -> target) and files added; with `rel`, only
+    _link's for that one symlink, checked alone, so each rule is seen without the others."""
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    for f in files: write(os.path.join(root, f), 'int x;\n')
+    os.makedirs(os.path.join(root, '.git'), exist_ok=True); write(os.path.join(root, '.git', 'config'), '[core]\n')
+    for path, target in links:
+        os.makedirs(os.path.dirname(os.path.join(root, path)) or root, exist_ok=True)
+        os.symlink(target, os.path.join(root, path))
+    if rel is not None:
+        return analysis_error(lambda: va._link(root, rel, os.path.join(root, rel), 'core'))
+    return analysis_error(lambda: run('good', tree=(root, manifest)))
+
+
+def fifo_link():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    os.makedirs(os.path.join(root, 'app')); os.mkfifo(os.path.join(root, 'core', 'pipe'))
+    os.symlink('../core/pipe', os.path.join(root, 'app', 'f'))
+    return analysis_error(lambda: va._link(root, 'app/f', os.path.join(root, 'app', 'f'), 'core'))
+
+
+SHIM = 'app/Sources/OSVACore/osva_shim.c'
+UP = ('up', '.')
+ESCAPE = (SHIM, '../../../up/../core/ffi/osva_shim.c')       # reads as core/ffi/osva_shim.c; is ../core/ffi/osva_shim.c
+check("OSVA Monitor's one symlink, a file in the checkout by its real path, passes",
+      escape([(SHIM, '../../../core/ffi/osva_shim.c')], files=['core/ffi/osva_shim.c']) is None)
+check('a folder symlink outside the project raises (up -> .)', escape([UP]) == 'a symlink to a folder: up')
+check('a symlink whose real path leaves the checkout through a folder symlink raises, though its text reads inside',
+      escape([UP, ESCAPE], files=['core/ffi/osva_shim.c'], rel=SHIM) == 'a symlink points outside the repository: ' + SHIM
+      and escape([UP, ESCAPE], files=['core/ffi/osva_shim.c']) is not None)
+check('a symlink into .git through a folder symlink raises (app/g -> up/.git/config)',
+      escape([UP, ('app/g', '../up/.git/config')], rel='app/g') == 'a symlink points into .git: app/g'
+      and escape([('app/g', '../.git/config')]) == 'a symlink points into .git: app/g')
+check('a dangling symlink raises', escape([('app/d', 'missing.c')]) == 'a symlink points at nothing: app/d')
+check('a symlink whose real path is in the checkout but not where its text reads raises (through up -> .)',
+      escape([UP, ('app/s.c', '../up/core/ffi/osva_shim.c')], files=['core/ffi/osva_shim.c'], rel='app/s.c')
+      == 'a symlink points outside the repository: app/s.c')
+check('a symlink to a fifo raises', (lambda r: r if r is None else r)(attempt(lambda: fifo_link())) == 'a symlink to something that is not a regular file: app/f')
+check('a symlink to a folder in the checkout raises', escape([('app/ffi', '../core')]) == 'a symlink to a folder: app/ffi')
 check('a symlink outside the project pointing outside the checkout raises',
       with_symlink('README.md', A_LEAN) == 'a symlink points outside the repository: README.md'
       and with_symlink('docs/x', '../../x') == 'a symlink points outside the repository: docs/x'
@@ -1183,12 +1263,19 @@ check('a private declaration of the name is not its source (Lean gives it anothe
 check('after an end that closes what is not open, nothing more in that file is a source',
       attempt(lambda: source_of({'core/A.lean': 'namespace Bad\nend Worse\nnamespace Good\ntheorem t1 : True := trivial\nend Good\n'}))
       == list(GOOD_SRC))
+check('#exit anywhere outside comments and strings ends the file; so does a « with no » on its line',
+      [attempt(lambda t=t: va.declarations(t)) for t in (
+          'namespace OSVA\nmake_theorem t\nend OSVA #exit\ntheorem OSVA.t : True := trivial\n',
+          'example : True := trivial #exit\ntheorem t : True := trivial\n',
+          'theorem a : True := trivial\ndef x := «oops\ntheorem t : True := trivial\n',
+          'def s := "#exit" -- #exit\ntheorem t : True := trivial\ndef x#exit := 1\ntheorem u : True := trivial\n')]
+      == [[], [], [(('a',), 1), (('x',), 2)], [(('s',), 1), (('t',), 2), (('x',), 3)]])
 check('#exit at the start of a line ends the file: a decoy after it is no source',
       attempt(lambda: source_of({'core/Good.lean': 'namespace Good\nmy_theorem_macro t1\ndef f := 1\n#exit\ntheorem t1 : True := trivial\n'
                                                      'def g := 2\nend Good\n'})) == [None, at('core/Good.lean', 3)]
       and attempt(lambda: va.declarations('namespace OSVA\nmake_theorem t\n#exit\ntheorem OSVA.t : True := trivial\n')) == []
       and attempt(lambda: va.declarations('-- #exit\n/- \n#exit -/\ndef s := "\n#exit"\ntheorem t : True := trivial\n  #exitx\ntheorem u : True := trivial\n'))
-      == [(('s',), 4), (('t',), 6), (('u',), 8)]
+      == [(('s',), 4), (('t',), 6)]
       and attempt(lambda: va.declarations('theorem a : True := trivial\n  #exit\ntheorem b : True := trivial\n')) == [(('a',), 1)])
 check('a theorem with universe parameters, t1.{u}, has its source',
       attempt(lambda: source_of({'core/Good.lean': 'namespace Good\ntheorem t1.{u} : True := trivial\ndef f := 1\nend Good\n'}))
