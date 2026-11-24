@@ -267,6 +267,16 @@ check('names prints one JSON array per declaration, sorted, and nothing else',
 check('names writes a «» component as it is and a number as a number',
       ['Good', 'key never leaves'] in parsed and ['_private', 'Init', 'Classical', 0, 'Classical', 'em', 'match_1_1'] in parsed
       and '["Good","key never leaves"]' in name_lines)
+# imports --manifest F --source D: the toolchain libraries the project's .lean files import.
+imp = tree('good', (('x', 'Good.t1', 'model'),))
+write(os.path.join(imp, 'core', 'Good', 'X.lean'), 'import LeanChecker.«x»\npublic import Std.Data\n')
+write(os.path.join(imp, 'Outside.lean'), 'import LeanIR\n')
+r = cli('imports', '--manifest', os.path.join(imp, '.verificationalliance.json'), '--source', imp)
+check('imports prints the roots the project imports, sorted, one per line',
+      r.code == 0 and r.err == '' and r.out == 'LeanChecker\nStd\n')
+os.symlink(os.path.join(imp, 'core', 'Good.lean'), os.path.join(imp, 'core', 'Link.lean'))
+check('imports through a symlinked file rejected',
+      cli('imports', '--manifest', os.path.join(imp, '.verificationalliance.json'), '--source', imp).rejected('symlink'))
 check('names of a file that is not an export rejected',
       cli('names', write(fresh('x.ndjson'), '{"meta":1}\n::error::x\n')).rejected('the export cannot be read'))
 # The build digest covers the manifest file that --manifest names.

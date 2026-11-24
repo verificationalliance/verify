@@ -129,9 +129,7 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     for rel, path in _build_inputs(source_dir, prefix) + [(manifest_rel, manifest_file)]:
         if rel in hashes:
             continue
-        in_project = (rel.endswith('.lean') and (not prefix or rel.startswith(prefix + '/'))
-                      and not any(p in UNREAD for p in rel.split('/')[:-1]))
-        hashes[rel], size, data = _hash(path, rel, MAX_TOTAL - total, in_project)
+        hashes[rel], size, data = _hash(path, rel, MAX_TOTAL - total, _read_as_text(rel, prefix))
         total += size
         if data is None:
             continue
@@ -186,6 +184,42 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     except ResultError as e:
         raise AnalysisError('the result is not valid: %s' % e) from None
     return result
+
+
+# An import at the start of a line or after a comment, with its modifiers. Group 1 is the module's
+# first component as written, in «» or not.
+_IMPORT = re.compile(r'(?:^|-/)[^\S\n]*(?:(?:public|private|meta)\s+)*import\s+(?:all\s+)?(«[^»\n]*»|[^\s.«]+)',
+                     re.MULTILINE)
+
+
+def import_roots(source_dir, project):
+    """The first component of every module that the project's .lean files import (Lean for
+    `import Lean.Data.Json`), sorted: the libraries of the toolchain that the project may use.
+
+    The files are those analyze reads as text, read the same way. Imports are plain syntax at the top
+    of a file, which no macro can make. This takes every line that starts like one (after spaces, or
+    after a comment's closing -/), wherever it is in the file, even inside a comment: it may name more
+    libraries than the project imports, so more names are compared, not fewer."""
+    _, prefix = _project(source_dir, project)
+    roots = set()
+    total = 0
+    for rel, path in _build_inputs(source_dir, prefix):
+        if not _read_as_text(rel, prefix):
+            continue
+        _, size, data = _hash(path, rel, MAX_TOTAL - total, True)
+        total += size
+        if data is not None:
+            for m in _IMPORT.finditer(data.decode('utf-8', errors='replace')):
+                root = m.group(1)
+                roots.add(root[1:-1] if root.startswith('«') else root)
+    return sorted(roots)
+
+
+def _read_as_text(rel, prefix):
+    """Whether steps 6 and 7 read a build input as text: a .lean file of the project, outside any
+    folder named .lake or .git."""
+    return (rel.endswith('.lean') and (not prefix or rel.startswith(prefix + '/'))
+            and not any(p in UNREAD for p in rel.split('/')[:-1]))
 
 
 def _shown(text, what, newlines=False):

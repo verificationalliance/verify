@@ -196,6 +196,9 @@ def result_message(mut):
     return None
 
 
+check('a final line break after repo, commit or build_digest rejected',
+      [k for k, v in (('repo', 'github.com/acme/proj'), ('commit', 'a' * 40), ('build_digest', 'b' * 64))
+       if not result_rejected(lambda r, k=k, v=v: r.update({k: v + '\n'}))] == [])
 check('a hidden character is named by its code point, never written',
       result_message(lambda r: TEXT_FIELDS['says'](r, '​'))
       == 'says holds the character U+200B, which a report cannot show')
@@ -1035,6 +1038,40 @@ check('a name only the second reference declares is compared',
       rejected_with('good', ['Good.«key never leaves»'], 'Nat.lt',
                     ref=attempt(lambda: [reference('good', 'Good', drop={'Nat.lt'}),
                                          reference('good', 'Good', change=other_nat_lt)])))
+
+# The toolchain libraries a project imports, read from its .lean files as text: the workflow
+# compares the names of a library beyond Init, Std, Lean and Lake only if the project imports it.
+def roots_of(files, project='core'):
+    root = fresh('imports')
+    for rel, text in files.items():
+        write(os.path.join(root, rel), text)
+    return va.import_roots(root, project)
+
+
+check('import roots: plain, dotted, with modifiers, in «», after a comment, across a line break',
+      attempt(lambda: roots_of({
+          'core/A.lean': 'module\nimport Lean.Data.Json\npublic meta import all «LeanExport».Parse\n'
+                         '/- doc -/ import LeanChecker\n  import Good\n',
+          'core/sub/B.lean': 'private import\n  LeanIR\n'}))
+      == ['Good', 'Lean', 'LeanChecker', 'LeanExport', 'LeanIR'])
+check('import roots: a comment line and an import later on a line are not imports',
+      attempt(lambda: roots_of({'core/A.lean': '-- import LeanChecker\ndef x := 1 -- import LeanIR\nimported Leanc\n'})) == [])
+check('import roots: only the project, never .lake or .git, never a file over 2 MiB',
+      attempt(lambda: roots_of({'core/A.lean': 'import Std\n', 'other/B.lean': 'import LeanChecker\n',
+                                'core/.lake/C.lean': 'import LeanIR\n', 'core/x/.git/D.lean': 'import Leanc\n',
+                                'core/Big.lean': 'import LakeMain\n' + ' ' * (2 * 1024 * 1024)})) == ['Std'])
+check('import roots: a line that only looks like an import still counts, so more is compared',
+      attempt(lambda: roots_of({'core/A.lean': '/-\nimport LeanChecker\n-/\n'})) == ['LeanChecker'])
+
+
+def symlinked_import():
+    root = fresh('imports')
+    write(os.path.join(root, 'core', 'A.lean'), 'import Std\n')
+    os.symlink(os.path.join(root, 'core', 'A.lean'), os.path.join(root, 'core', 'L.lean'))
+    return va.import_roots(root, 'core')
+
+
+check('import roots: a symlinked .lean file raises', analysis_error(symlinked_import) == SYMLINKS + 'core/L.lean')
 
 # Messages go to the developer's log in a job that holds a token. GitHub's runner reads `::command::`
 # at the start of a line and the legacy `##[command]` anywhere in one, and may skip invisible

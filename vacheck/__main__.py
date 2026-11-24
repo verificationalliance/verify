@@ -5,6 +5,8 @@
     modules <manifest>               prints the project folder, then the modules, one per line
     names <export>                   prints every declaration's name, one per line, as the JSON array
                                      of its components: a string for Name.str, a number for Name.num
+    imports --manifest F --source D  prints the first component of every module the project's .lean
+                                     files import, one per line, sorted
     analyze --export F --reference F [--reference F ...] --manifest F --source D --repo R --commit C
             --toolchain V --kernels K,K --nanoda PATH
                                      prints result.json
@@ -26,7 +28,7 @@ import sys
 import tempfile
 
 from . import toolchain as _toolchain
-from .analyze import AnalysisError, analyze
+from .analyze import AnalysisError, analyze, import_roots
 from .export import ExportError, load_export
 from .manifest import MAX_BYTES as MANIFEST_BYTES, ManifestError, parse_manifest
 from .result import ALLOWED_AXIOMS, ResultError, validate_result
@@ -237,6 +239,11 @@ def nanoda_printer(nanoda, export_path):
     return printer
 
 
+def imports(args):
+    manifest = _manifest(args.manifest)
+    _out(''.join(root + '\n' for root in import_roots(os.path.abspath(args.source), manifest.project)))
+
+
 def analyze_command(args):
     if _toolchain.lookup(args.toolchain) is None:
         raise Rejected(_unsupported())
@@ -301,6 +308,10 @@ def _parser():
         p.add_argument('--' + flag, required=True)
     p.add_argument('--reference', required=True, action='append')
     p.set_defaults(run=analyze_command)
+    p = commands.add_parser('imports')
+    p.add_argument('--manifest', required=True)
+    p.add_argument('--source', required=True)
+    p.set_defaults(run=imports)
     return parser
 
 

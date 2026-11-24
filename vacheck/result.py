@@ -14,9 +14,10 @@ MAX_BYTES = 96000
 # line break is allowed only in a statement and a definition's text.
 _HIDDEN = frozenset(('Cc', 'Cf', 'Zl', 'Zp', 'Cs'))
 
-_REPO = re.compile(r'^github\.com/[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$')
-_SHA1 = re.compile(r'^[0-9a-f]{40}$')
-_SHA256 = re.compile(r'^[0-9a-f]{64}$')
+# Matched with fullmatch: `$` would also accept a final line break.
+_REPO = re.compile(r'github\.com/[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}')
+_SHA1 = re.compile(r'[0-9a-f]{40}')
+_SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
 class ResultError(Exception):
@@ -103,11 +104,11 @@ def validate_result(obj):
                 'claims', 'evidence', 'kernels'), 'result')
     if obj['schema'] != SCHEMA:
         _fail('wrong schema')
-    if not isinstance(obj['repo'], str) or not _REPO.match(obj['repo']):
+    if not isinstance(obj['repo'], str) or not _REPO.fullmatch(obj['repo']):
         _fail('bad repo')
-    if not isinstance(obj['commit'], str) or not _SHA1.match(obj['commit']):
+    if not isinstance(obj['commit'], str) or not _SHA1.fullmatch(obj['commit']):
         _fail('bad commit')
-    if not isinstance(obj['build_digest'], str) or not _SHA256.match(obj['build_digest']):
+    if not isinstance(obj['build_digest'], str) or not _SHA256.fullmatch(obj['build_digest']):
         _fail('bad build_digest')
     _str(obj['toolchain'], 'toolchain', 64)
     _str(obj['checker'], 'checker', 64)
