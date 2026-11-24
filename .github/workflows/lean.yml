@@ -15,8 +15,9 @@
 # - `check` runs nothing from the repository and loads nothing that `build` made but the export,
 #   as data: it replays the export through the official toolchain's kernels and compares it with
 #   the toolchain's own libraries. It has no id-token either. Every native tool that reads the
-#   export or names from it runs in a bwrap sandbox: no network, no environment, none of the
-#   runner's files, only its inputs bound read-only.
+#   export or names from it runs in a bwrap sandbox, as `lake check` runs its kernels: no network,
+#   no environment, and it reads none of the invoking user's files (nor /run or /var, where the
+#   docker socket is); only its inputs are bound back, read-only. A step tests that on the runner.
 # - `sign` runs no Lean and never sees the export. It receives result.json as a job output, never
 #   as an artifact (any job in the run, `build` included, can upload an artifact), validates it,
 #   checks that it is for this repository and commit, and has GitHub sign it.
@@ -44,8 +45,8 @@ defaults:
 
 env:
   MANIFEST: ${{ inputs.manifest }}
-  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.0/vacheck.pyz
-  VACHECK_SHA256: 2d5afc846aade0a8653ca36adbeb6d06681b967e66d3218181eba37a3314ec22
+  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.1/vacheck.pyz
+  VACHECK_SHA256: 8558b5a2971403d78a41954a3658ba1d5fb2a0e10e89af2b02d890500dc1bfac
   MAX_EXPORT: "2147483648" # 2 GiB
   # The base64 of vacheck's largest result (96,000 bytes). Job sign reads it from an environment
   # variable, and Linux caps one at 128 KiB: 131,064 characters pass and 131,072 fail.
@@ -160,14 +161,15 @@ jobs:
           EOF
 
           # sandbox runs a native tool on hostile data as `lake check` runs its kernels: / read-only;
-          # /home, /root, /run/user and /tmp empty, so none of the runner's files (the workspace,
-          # GITHUB_ENV, GITHUB_OUTPUT) are there; no network; an empty environment; and only the
-          # paths it is given bound back.
+          # /home, /root, /run, /var and /tmp empty, so it reads none of the invoking user's files
+          # (the workspace, GITHUB_ENV, GITHUB_OUTPUT) and reaches no socket there (the docker
+          # socket is in /run, and the runner user is in group docker); no network; an empty
+          # environment; and only the paths it is given bound back.
           #   sandbox [--ro PATH]... [--rw FILE]... [--setenv NAME VALUE]... -- COMMAND ARG...
           cat > "$va/sandbox" <<'EOF'
           #!/bin/bash
           set -euo pipefail
-          args=(--ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /run/user --tmpfs /tmp --dir /tmp/home
+          args=(--ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /run --tmpfs /var --tmpfs /tmp --dir /tmp/home
                 --dev /dev --proc /proc --clearenv --setenv HOME /tmp/home --setenv PATH /usr/bin:/bin)
           while [[ $# -gt 0 && $1 != -- ]]; do
             case $1 in
@@ -181,6 +183,72 @@ jobs:
           exec bwrap "${args[@]}" --unshare-all --die-with-parent --new-session -- "$@"
           EOF
           chmod +x "$va/sandbox"
+
+          # probe.sh runs inside the sandbox, to test it: given a file it must show read-only, then
+          # paths it must not show.
+          cat > "$va/probe.sh" <<'EOF'
+          fail() { echo "The sandbox $1."; exit 1; }
+          given=$1
+          shift
+          [[ -r $given && $(cat "$given") == probe ]] || fail "does not show a file it is given"
+          { echo x >> "$given"; } 2> /dev/null && fail "lets a read-only file it is given be written"
+          for p in "$@"; do
+            [[ -e $p || -L $p ]] && fail "shows $p"
+          done
+          { : > /usr/sandbox-probe; } 2> /dev/null && fail "lets / be written"
+          compgen -e | grep -qE '^(GITHUB|ACTIONS|RUNNER)_' && fail "passes the runner's environment on"
+          grep -v '|' /proc/net/dev | grep -v '^ *lo:' | grep -q . && fail "has a network"
+          echo "The sandbox shows only what it is given."
+          EOF
+
+          # libraries.py sorts the toolchain's modules, every .olean below lib/lean, into libraries:
+          # @base (everything below Init, Std, Lean and Lake) and one per other top-level .olean.
+          #   libraries.py LIB OUT       writes OUT/@base.modules, OUT/<library>.modules,
+          #                              OUT/@libraries and OUT/shipped.tsv (module, path)
+          #   libraries.py --uncovered OUT
+          #                              prints the shipped modules, with their .olean file, that no
+          #                              OUT/*.closure lists: those that no library loaded imports
+          cat > "$va/libraries.py" <<'EOF'
+          import os, sys
+          BASE = ('Init', 'Std', 'Lean', 'Lake')
+          if sys.argv[1] == '--uncovered':
+              out = sys.argv[2]
+              covered = set()
+              for f in os.listdir(out):
+                  if f.endswith('.closure'):
+                      with open(os.path.join(out, f), encoding='utf-8') as c:
+                          covered.update(line for line in c.read().split('\n') if line)
+              with open(os.path.join(out, 'shipped.tsv'), encoding='utf-8') as f:
+                  for line in f:
+                      module, path = line.rstrip('\n').split('\t')
+                      if module not in covered:
+                          print(module + '\t' + path)
+              sys.exit(0)
+          lib, out = sys.argv[1:3]
+          os.makedirs(out)
+          modules = []
+          for d, dirs, files in os.walk(lib):
+              dirs.sort()
+              for f in sorted(files):
+                  if f.endswith('.olean'):
+                      rel = os.path.relpath(os.path.join(d, f), lib)[:-len('.olean')]
+                      modules.append(('.'.join(rel.split(os.sep)), os.path.join(d, f)))
+          top = sorted(m for m, _ in modules if '.' not in m)
+          if not all(b in top for b in BASE):
+              sys.exit('The toolchain does not ship Init, Std, Lean and Lake.')
+          groups = {}
+          for m, _ in modules:
+              root = m.split('.')[0]
+              if root in top:
+                  groups.setdefault('@base' if root in BASE else root, []).append(m)
+          for key, ms in groups.items():
+              with open(os.path.join(out, key + '.modules'), 'w', encoding='utf-8') as f:
+                  f.write(''.join(m + '\n' for m in ms))
+          with open(os.path.join(out, '@libraries'), 'w', encoding='utf-8') as f:
+              f.write(''.join(r + '\n' for r in top if r not in BASE))
+          with open(os.path.join(out, 'shipped.tsv'), 'w', encoding='utf-8') as f:
+              f.write(''.join('%s\t%s\n' % mp for mp in modules))
+          EOF
 
       - &read-manifest
         name: Read the manifest
@@ -283,6 +351,33 @@ jobs:
 
       - *get-checker
 
+      - name: Test the sandbox, then stop docker
+        run: |
+          va="$RUNNER_TEMP/va"
+          # On this runner, before anything hostile is read: the sandbox must hide the docker socket
+          # (root on the host, and the runner user is in group docker), the step's command files,
+          # the job's folders and the runner's environment, and must have no network.
+          if [[ -S /run/docker.sock ]]; then
+            echo "This runner has /run/docker.sock, which the sandbox must hide."
+          fi
+          # From /tmp, so that nothing of $RUNNER_TEMP is bound into the sandbox for the test.
+          probe=$(mktemp -d)
+          cp "$va/probe.sh" "$probe/probe.sh"
+          echo probe > "$probe/given"
+          if ! "$va/sandbox" --ro "$probe/given" --ro "$probe/probe.sh" -- /bin/bash "$probe/probe.sh" "$probe/given" \
+              /run/docker.sock /var/run/docker.sock "$GITHUB_OUTPUT" "$GITHUB_ENV" "$GITHUB_PATH" \
+              "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP" "$va/vacheck.pyz" "$GITHUB_WORKSPACE" "$HOME"; then
+            echo "::error::The sandbox for nanoda_bin and the reference program does not isolate them."
+            exit 1
+          fi
+          # And no docker at all from here on.
+          sudo systemctl stop docker.socket docker.service
+          if systemctl is-active --quiet docker.socket || systemctl is-active --quiet docker.service; then
+            echo "::error::Docker is still running."
+            exit 1
+          fi
+          echo "Docker is stopped."
+
       # The same reading as in build, but here: nothing build says is trusted.
       - *read-manifest
 
@@ -323,10 +418,16 @@ jobs:
         run: |
           # Every declaration in the export whose name a library of the toolchain declares, exported
           # from that library with the toolchain's own leanexport code, with what each depends on.
-          # vacheck analyze compares them, so a project cannot redefine Eq, Nat or any other name of
-          # the toolchain's. Init, Std, Lean and Lake are loaded together; every other library (each
-          # of LeanChecker, LeanExport, LeanIR, Leanc and LakeMain defines `main`) is loaded alone,
-          # for the names the four do not have. A library that cannot be loaded fails the check.
+          # vacheck analyze compares them, so a project cannot redefine Eq, Nat or another name of
+          # the toolchain's. The libraries:
+          # - @base: every module below Init, Std, Lean and Lake, loaded together and always compared;
+          # - each other top-level .olean (LeanChecker, LeanExport, LeanIR, Leanc, LakeMain; each
+          #   defines `main`) with the modules below it, loaded alone, for the names @base lacks, and
+          #   compared only if the project's .lean files import it. A name of a library the project
+          #   does not import is its own, shown with its definition: LeanChecker declares a
+          #   top-level `println`, and so may a project.
+          # A library that cannot be loaded fails the check, and so does a shipped module that no
+          # library loaded imports, if it declares constants.
           # The names go through files, as data: the leanexport command line can neither take this
           # many nor write names such as _private.Init.Prelude.0.x.
           va="$RUNNER_TEMP/va"
@@ -334,6 +435,9 @@ jobs:
           work=$(cat "$va/work")
           export_file="$RUNNER_TEMP/export/export.ndjson"
           python3 -I "$va/vacheck.pyz" names "$export_file" > "$work/names.jsonl"
+          python3 -I "$va/vacheck.pyz" imports --manifest "$GITHUB_WORKSPACE/$MANIFEST" \
+            --source "$GITHUB_WORKSPACE" > "$work/imports"
+          python3 -I "$va/libraries.py" "$lean/lib/lean" "$work/libs"
           cat > "$work/Reference.lean" <<'EOF'
           import Lean.Data.Json.Parser
           import LeanExport.Basic
@@ -352,59 +456,93 @@ jobs:
                 else throw "a name component that is not a natural number"
               | _ => throw "a name component that is neither a string nor a number"
 
-          /-- reference NAMES REST MODULE...: imports the modules, exports to stdout every declaration
-          named in NAMES that they have, and writes the lines of NAMES that they lack to REST. -/
+          /-- reference NAMES REST CLOSURE MODULES: imports the modules listed in MODULES, one per
+          line; exports to stdout every declaration named in NAMES that they have; writes the lines of
+          NAMES that they lack to REST, and the modules of their import closure to CLOSURE.
+          reference --constants OLEAN...: the number of constants each .olean file declares. -/
           def main (args : List String) : IO UInt32 := do
-            let namesIn :: namesOut :: modules := args
-              | throw <| IO.userError "usage: reference <names> <rest> <module>..."
-            if modules.isEmpty then throw <| IO.userError "usage: reference <names> <rest> <module>..."
-            initSearchPath (← findSysroot)
-            let env ← importModules (modules.toArray.map fun m => { module := m.toName }) {}
-            let mut found := #[]
-            let mut rest := ""
-            for line in ← IO.FS.lines namesIn do
-              match Json.parse line >>= nameOf with
-              | .ok n => if env.contains n then found := found.push n else rest := rest ++ line ++ "\n"
-              | .error e => throw <| IO.userError s!"the names file: {e}"
-            IO.FS.writeFile namesOut rest
-            LeanExport.dumpEnv env found.toList ["--export-unsafe"]
-            return 0
+            match args with
+            | "--constants" :: files =>
+              for f in files do
+                let (data, _) ← readModuleData f
+                IO.println s!"{data.constNames.size}"
+              return 0
+            | [namesIn, namesOut, closureOut, modulesIn] =>
+              let modules := (← IO.FS.lines modulesIn).filter (!·.isEmpty)
+              if modules.isEmpty then throw <| IO.userError "no modules to import"
+              initSearchPath (← findSysroot)
+              let env ← importModules (modules.map fun m => { module := m.toName }) {}
+              IO.FS.writeFile closureOut (String.join (env.header.moduleNames.toList.map (toString · ++ "\n")))
+              let mut found := #[]
+              let mut rest := ""
+              for line in ← IO.FS.lines namesIn do
+                match Json.parse line >>= nameOf with
+                | .ok n => if env.contains n then found := found.push n else rest := rest ++ line ++ "\n"
+                | .error e => throw <| IO.userError s!"the names file: {e}"
+              IO.FS.writeFile namesOut rest
+              LeanExport.dumpEnv env found.toList ["--export-unsafe"]
+              return 0
+            | _ => throw <| IO.userError "usage: reference <names> <rest> <closure> <modules>"
           EOF
           cd "$work"
           "$lean/bin/lean" -c reference.c Reference.lean
           "$lean/bin/leanc" -o reference reference.c -lLeanExport
           mkdir refs
-          # reference NAMES REST OUT MODULE...: the reference program, in the sandbox. The paths are
-          # absolute, because the sandbox has only them, not the folder they are in.
+          # reference NAMES REST LIBRARY: the reference program for one library, in the sandbox. It
+          # writes refs/LIBRARY.ndjson and libs/LIBRARY.closure. The paths are absolute, because the
+          # sandbox has only them, not the folder they are in.
           reference() {
-            local names=$1 rest=$2 out=$3
-            shift 3
+            local names=$1 rest=$2 library=$3
             : > "$rest"
-            if ! "$va/sandbox" --ro "$lean" --ro "$work/reference" --ro "$names" --rw "$rest" \
+            : > "$work/libs/$library.closure"
+            if ! "$va/sandbox" --ro "$lean" --ro "$work/reference" --ro "$names" --ro "$work/libs/$library.modules" \
+                --rw "$rest" --rw "$work/libs/$library.closure" \
                 --setenv LEAN_SYSROOT "$lean" --setenv LEAN_ABORT_ON_PANIC 1 \
-                -- "$work/reference" "$names" "$rest" "$@" > "$out" 2> reference.log; then
+                -- "$work/reference" "$names" "$rest" "$work/libs/$library.closure" "$work/libs/$library.modules" \
+                > "$work/refs/$library.ndjson" 2> reference.log; then
               python3 -I "$va/say.py" "$va/vacheck.pyz" < reference.log
-              echo "::error::The toolchain's reference could not be exported from $*."
+              echo "::error::The toolchain's reference could not be exported from $library."
               exit 1
             fi
-            echo "$out" >> "$va/references"
           }
-          reference "$work/names.jsonl" "$work/rest.jsonl" "$work/refs/main.ndjson" Init Std Lean Lake
+          # @base cannot be the name of a library: a module name cannot start with @.
+          reference "$work/names.jsonl" "$work/rest.jsonl" @base
+          echo "$work/refs/@base.ndjson" > "$va/references"
           # Every executable's library defines its own `main`, so a project's `main` is left to be
           # shown as the project's own, with its definition, rather than compared with one of them.
-          grep -vxF '["main"]' rest.jsonl > lookup.jsonl || true
-          libraries=0
-          for olean in "$lean"/lib/lean/*.olean; do
-            library=$(basename "$olean" .olean)
-            case $library in Init|Std|Lean|Lake) continue;; esac
-            reference "$work/lookup.jsonl" "$work/unused.jsonl" "$work/refs/$library.ndjson" "$library"
-            libraries=$((libraries + 1))
-          done
-          if (( libraries == 0 )); then
+          grep -vxF '["main"]' rest.jsonl > lookup.jsonl || [[ $? -eq 1 ]]
+          libraries=() compared=()
+          while read -r library; do
+            reference "$work/lookup.jsonl" "$work/unused.jsonl" "$library"
+            libraries+=("$library")
+            if grep -qxF "$library" imports; then
+              echo "$work/refs/$library.ndjson" >> "$va/references"
+              compared+=("$library")
+            elif (( $? != 1 )); then
+              echo "::error::The project's imports could not be read."
+              exit 1
+            fi
+          done < libs/@libraries
+          if (( ${#libraries[@]} == 0 )); then
             echo "::error::The toolchain has no library besides Init, Std, Lean and Lake."
             exit 1
           fi
+          # Every shipped module is in the import closure of a library loaded here, or its .olean
+          # declares no constants: otherwise a project could import it and none of its names would
+          # be compared. These are the toolchain's own files, read without a sandbox.
+          python3 -I "$va/libraries.py" --uncovered "$work/libs" > uncovered.tsv
+          if [[ -s uncovered.tsv ]]; then
+            mapfile -t files < <(cut -f 2 uncovered.tsv)
+            "$work/reference" --constants "${files[@]}" > constants
+            declaring=$(paste uncovered.tsv constants | awk -F '\t' '$3 != 0 { print $1 }' | sort -u | paste -sd ' ')
+            if [[ -n $declaring ]]; then
+              echo "::error::The toolchain ships modules that declare constants and that no library loaded here imports: $declaring"
+              exit 1
+            fi
+            echo "Shipped modules that no library imports, all declaring no constants: $(cut -f 1 uncovered.tsv | sort -u | paste -sd ' ')"
+          fi
           echo "The export has $(wc -l < names.jsonl) declarations; $(wc -l < rest.jsonl) are not in Init, Std, Lean or Lake."
+          echo "Libraries loaded besides @base: ${libraries[*]}; compared, because the project imports them: ${compared[*]:-none}."
           for f in refs/*.ndjson; do echo "Reference $(basename "$f" .ndjson): $(stat -c %s "$f") bytes."; done
 
       - name: Analyze

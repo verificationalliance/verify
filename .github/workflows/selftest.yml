@@ -1,6 +1,7 @@
-# Runs lean.yml on fixtures, as a developer's repository would call it: `good` must pass and be
-# signed; `sorry`, `fakeeq`, `native`, `axiom` and `forge` must fail, all in job `check`. The run as
-# a whole shows as failed, because they do; the assert jobs are the verdict.
+# Runs lean.yml on fixtures, as a developer's repository would call it: `good` and `println` must
+# pass and be signed; `sorry`, `fakeeq`, `native`, `axiom` and `forge` must fail, all in job `check`.
+# The run as a whole shows as failed, because they do; the assert jobs are the verdict. Two calls
+# sign here, so the run's osva-proof-result is either one's: both are this repository and commit.
 name: selftest
 
 on:
@@ -57,8 +58,19 @@ jobs:
       id-token: write
       attestations: write
 
-  # A declaration named like one of the toolchain's LeanExport library, which is not one of Init,
-  # Std, Lean and Lake: the check must compare it with that library.
+  # The project's own top-level `println`, which LeanChecker also declares. The project does not
+  # import LeanChecker, so its `println` is its own: the check must pass.
+  println:
+    uses: ./.github/workflows/lean.yml
+    with:
+      manifest: tests/fixtures/println/.verificationalliance.json
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  # The project's own LeanExport.dumpEnv, made while it imports another module of LeanExport: the
+  # check must compare it with the toolchain's and fail.
   forge:
     uses: ./.github/workflows/lean.yml
     with:
@@ -69,7 +81,7 @@ jobs:
       attestations: write
 
   assert:
-    needs: [good, sorry, fakeeq, native, axiom, forge]
+    needs: [good, println, sorry, fakeeq, native, axiom, forge]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -80,16 +92,18 @@ jobs:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
     steps:
-      - name: good passed and sorry failed
+      - name: good and println passed, sorry failed
         env:
           GOOD: ${{ needs.good.result }}
+          PRINTLN: ${{ needs.println.result }}
           SORRY: ${{ needs.sorry.result }}
         run: |
-          echo "good: $GOOD, sorry: $SORRY"
+          echo "good: $GOOD, println: $PRINTLN, sorry: $SORRY"
           test "$GOOD" = success
+          test "$PRINTLN" = success
           test "$SORRY" = failure
 
-      - name: Download the result of good
+      - name: Download a signed result
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: osva-proof-result
@@ -97,7 +111,7 @@ jobs:
 
       # What our server checks: the bundle signs result.json, under our predicate type, from
       # lean.yml of this repository, on a GitHub-hosted runner.
-      - name: The result of good is signed by lean.yml
+      - name: The result is signed by lean.yml, for this commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -113,7 +127,7 @@ jobs:
   # Failing in `build` would mean the trust check never ran. Only job names and conclusions are
   # read, never log text.
   assert-check:
-    needs: [good, sorry, fakeeq, native, axiom, forge]
+    needs: [good, println, sorry, fakeeq, native, axiom, forge]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -123,7 +137,7 @@ jobs:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
     steps:
-      - name: The five failed in check, and good was signed
+      - name: The five failed in check, and good and println were signed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -135,4 +149,7 @@ jobs:
             test "$(awk -F'\t' -v n="$c / build (untrusted)" '$1 == n {print $2}' jobs.tsv)" = success
             test "$(awk -F'\t' -v n="$c / sign" '$1 == n {print $2}' jobs.tsv)" != success
           done
-          test "$(awk -F'\t' '$1 == "good / sign" {print $2}' jobs.tsv)" = success
+          for c in good println; do
+            test "$(awk -F'\t' -v n="$c / check" '$1 == n {print $2}' jobs.tsv)" = success
+            test "$(awk -F'\t' -v n="$c / sign" '$1 == n {print $2}' jobs.tsv)" = success
+          done

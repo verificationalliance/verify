@@ -1,0 +1,5 @@
+name = "println"
+defaultTargets = ["Println"]
+
+[[lean_lib]]
+name = "Println"
