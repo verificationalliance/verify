@@ -35,7 +35,7 @@ permissions:
   contents: read
 jobs:
   verify:
-    uses: verificationalliance/verify/.github/workflows/lean.yml@9ade54f5ae013edfab689dd7c2b763ee5b6e0ab9 # workflow-5
+    uses: verificationalliance/verify/.github/workflows/lean.yml@6512d67903dd322b2d3ff7b9563fb740f2518243 # workflow-6
     permissions:
       contents: read
       id-token: write
@@ -66,7 +66,9 @@ repository, or to nothing is refused.
 
 Pin the workflow by its full commit SHA, as above. The current release:
 
-- **workflow-5**, `9ade54f5ae013edfab689dd7c2b763ee5b6e0ab9`, with vacheck 1.1.3.
+- **workflow-6**, `6512d67903dd322b2d3ff7b9563fb740f2518243`, with vacheck 1.1.4.
+
+Superseded: workflow-5 (`9ade54f`, vacheck 1.1.3), still accepted for now. Move to workflow-6.
 
 Revoked: workflow-1 (`f209d20`), workflow-2 (`4e66300`), workflow-3 (`7896c82`) and workflow-4
 (`7b47c83`, never used). Their tags stay as history; a result one of them signed shows as needing a
