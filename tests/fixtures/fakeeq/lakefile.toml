@@ -1,0 +1,5 @@
+name = "fakeeq"
+defaultTargets = ["FakeEq"]
+
+[[lean_lib]]
+name = "FakeEq"
