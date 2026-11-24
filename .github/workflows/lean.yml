@@ -1,0 +1,434 @@
+# The Verification Alliance proof check for a Lean 4 project. Call it from a workflow of your own:
+#
+#   jobs:
+#     verify:
+#       uses: verificationalliance/verify/.github/workflows/lean.yml@<release sha>
+#       permissions:
+#         contents: read
+#         id-token: write
+#         attestations: write
+#
+# The trust boundary is the whole design:
+# - `build` runs the project's code (its lakefile, `#eval`, `initialize`, ...). It has no id-token,
+#   and everything it produces is untrusted.
+# - `check` runs nothing from the repository and loads nothing that `build` made but the export,
+#   as data: it replays the export through the official toolchain's kernels and compares it with
+#   the toolchain's own library. It has no id-token either.
+# - `sign` runs no Lean and never sees the export. It receives result.json as a job output, never
+#   as an artifact (any job in the run, `build` included, can upload an artifact), validates it and
+#   has GitHub sign it.
+#
+# No text from the repository or the export reaches the log unescaped: the runner reads workflow
+# commands in the log, and `check` and `sign` must not take any from the developer. vacheck's own
+# messages are escaped; every other tool's output goes through VA_SAY or into a file.
+name: lean
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: The path of the manifest in the repository.
+        type: string
+        required: false
+        default: .verificationalliance.json
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+env:
+  MANIFEST: ${{ inputs.manifest }}
+  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.0.0/vacheck.pyz
+  VACHECK_SHA256: 759243a6ccfa2842e13aa91874503390f8ec146f2b9854efaa1ce0f7cceda971
+  MAX_EXPORT: "2147483648" # 2 GiB
+  MAX_RESULT_B64: "921600" # 900 KiB, under GitHub's 1 MB limit on a job's outputs
+  # What `lake check --paranoid` runs: Lean's kernel, then the checkers the toolchain bundles.
+  KERNELS: lean,leanchecker-paranoid,lean4lean,nanoda,con-leche,con-ron
+  # Copies standard input to the log, each line through vacheck's log_line, so that nothing in it
+  # can be read as a workflow command. Lines are cut at 4096 bytes and the log at 400 lines.
+  VA_SAY: |
+    import sys
+    sys.path.insert(0, sys.argv[1])
+    from vacheck.text import log_line
+    shown = hidden = 0
+    while True:
+        raw = sys.stdin.buffer.readline(4096)
+        if not raw:
+            break
+        if shown < 400:
+            sys.stdout.write(log_line(raw.decode('utf-8', 'replace').rstrip('\n')) + '\n')
+            sys.stdout.flush()
+            shown += 1
+        else:
+            hidden += 1
+    if hidden:
+        print('(%d more lines not shown)' % hidden)
+  # Checks the manifest input: a relative path without `..`, to a file in the checkout, through
+  # no symlink. Run in the checkout. Prints nothing of the path.
+  VA_MANIFEST_PATH: |
+    import os, re, sys
+    path = os.environ['MANIFEST']
+    root = os.path.realpath('.')
+    parts = path.split('/')
+    if (not re.fullmatch(r'[A-Za-z0-9_.][A-Za-z0-9_./-]{0,254}', path) or '..' in parts
+            or os.path.realpath(path) != os.path.join(root, *[p for p in parts if p not in ('', '.')])
+            or not os.path.isfile(path)):
+        print('::error::The manifest input must name a file in the repository by a relative path, '
+              'without .. and through no symlink.')
+        sys.exit(1)
+  # Writes the theorem names the manifest claims, each followed by a NUL. Run after
+  # `vacheck modules`, which has already rejected a bad manifest with an escaped message.
+  VA_THEOREMS: |
+    import sys
+    sys.path.insert(0, sys.argv[1])
+    from vacheck.manifest import MAX_BYTES, parse_manifest
+    try:
+        with open(sys.argv[2], 'rb') as f:
+            manifest = parse_manifest(f.read(MAX_BYTES + 1))
+    except Exception:
+        sys.exit('The manifest cannot be read.')
+    sys.stdout.buffer.write(b''.join(c.theorem.encode('utf-8') + b'\0' for c in manifest.claims))
+
+jobs:
+  build:
+    name: build (untrusted)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Get the checker
+        run: |
+          va="$RUNNER_TEMP/va"
+          mkdir -p "$va"
+          curl -fsSL --proto '=https' --retry 3 -o "$va/vacheck.pyz" "$VACHECK_URL"
+          echo "$VACHECK_SHA256  $va/vacheck.pyz" | sha256sum -c -
+
+      - name: Read the manifest
+        run: |
+          va="$RUNNER_TEMP/va"
+          python3 -I -c "$VA_MANIFEST_PATH"
+          # The project folder, then the modules, one per line.
+          python3 -I "$va/vacheck.pyz" modules "$MANIFEST" > "$va/modules"
+          python3 -I -c "$VA_THEOREMS" "$va/vacheck.pyz" "$MANIFEST" > "$va/theorems"
+          project=$(head -n 1 "$va/modules")
+          python3 -I "$va/vacheck.pyz" toolchain "$project/lean-toolchain" > "$va/toolchain"
+          python3 -I "$va/vacheck.pyz" deps "$project/lake-manifest.json"
+          echo "The manifest names $(($(wc -l < "$va/modules") - 1)) modules and $(tr -cd '\0' < "$va/theorems" | wc -c) theorems."
+
+      - name: Install the toolchain
+        run: |
+          read -r url sha < "$RUNNER_TEMP/va/toolchain"
+          curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" "$url"
+          echo "$sha  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/lean"
+          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP/lean" --strip-components=1
+          rm "$RUNNER_TEMP/lean.tar.zst"
+          "$RUNNER_TEMP/lean/bin/lean" --version
+
+      - name: Build
+        run: |
+          va="$RUNNER_TEMP/va"
+          project=$(head -n 1 "$va/modules")
+          mapfile -t modules < <(tail -n +2 "$va/modules")
+          cd -- "$project"
+          if ! "$RUNNER_TEMP/lean/bin/lake" build "${modules[@]/#/+}" 2>&1 \
+              | python3 -I -c "$VA_SAY" "$va/vacheck.pyz"; then
+            echo "::error::lake build failed."
+            exit 1
+          fi
+
+      - name: Export the claimed theorems
+        run: |
+          va="$RUNNER_TEMP/va"
+          project=$(head -n 1 "$va/modules")
+          mapfile -t modules < <(tail -n +2 "$va/modules")
+          mapfile -d '' -t theorems < "$va/theorems"
+          mkdir "$RUNNER_TEMP/out"
+          out="$RUNNER_TEMP/out/export.ndjson"
+          cd -- "$project"
+          # Only the claimed theorems and what they depend on: an export of everything in scope is
+          # hundreds of megabytes even for a small project. A name leanexport cannot find is a
+          # panic; LEAN_ABORT_ON_PANIC makes it fail instead of writing a partial export.
+          set +o pipefail
+          LEAN_ABORT_ON_PANIC=1 "$RUNNER_TEMP/lean/bin/lake" env leanexport "${modules[@]}" -- "${theorems[@]}" \
+            2> "$va/export.log" | head -c "$((MAX_EXPORT + 1))" > "$out"
+          status=${PIPESTATUS[0]}
+          set -o pipefail
+          size=$(stat -c %s "$out")
+          if (( size > MAX_EXPORT )); then
+            echo "::error::The export is larger than 2 GiB."
+            exit 1
+          fi
+          if (( status != 0 )); then
+            python3 -I -c "$VA_SAY" "$va/vacheck.pyz" < "$va/export.log"
+            echo "::error::leanexport failed: every claimed theorem must be in the manifest's modules."
+            exit 1
+          fi
+          echo "The export is $size bytes."
+
+      - name: Upload the export
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: export
+          path: ${{ runner.temp }}/out/export.ndjson
+          retention-days: 1
+          if-no-files-found: error
+
+  check:
+    name: check
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    env:
+      # Writes the name of every declaration in an export, one per line, as the JSON array of its
+      # components (a string for Name.str, a number for Name.num), read with vacheck's own reader.
+      VA_NAMES: |
+        import json, sys
+        sys.path.insert(0, sys.argv[1])
+        from vacheck.export import ExportError, load_export
+        from vacheck.text import log_line
+        try:
+            env = load_export(sys.argv[2])
+        except (OSError, ExportError) as e:
+            sys.exit(log_line('The export cannot be read: %s' % e))
+        with open(sys.argv[3], 'w', encoding='utf-8') as out:
+            for c in env._decls:
+                comps = []
+                while c != 0:
+                    c, comp = env._parts[c]
+                    comps.append(comp)
+                out.write(json.dumps(comps[::-1], ensure_ascii=False) + '\n')
+    steps:
+      # The checkout is data: vacheck reads the manifest, the lean-toolchain and the Lake files, and
+      # hashes the build inputs. Nothing in it is run, built or loaded.
+      - name: Check out the commit, as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install bubblewrap
+        run: |
+          # `lake check` runs the kernels in a bwrap sandbox without network, which needs
+          # unprivileged user namespaces.
+          sudo apt-get update -q -o Acquire::Retries=3
+          sudo apt-get install -y -q -o Acquire::Retries=3 bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --unshare-all true
+
+      - name: Get the checker
+        run: |
+          va="$RUNNER_TEMP/va"
+          mkdir -p "$va"
+          curl -fsSL --proto '=https' --retry 3 -o "$va/vacheck.pyz" "$VACHECK_URL"
+          echo "$VACHECK_SHA256  $va/vacheck.pyz" | sha256sum -c -
+
+      - name: Read the manifest
+        run: |
+          va="$RUNNER_TEMP/va"
+          python3 -I -c "$VA_MANIFEST_PATH"
+          python3 -I "$va/vacheck.pyz" modules "$MANIFEST" > "$va/modules"
+          project=$(head -n 1 "$va/modules")
+          python3 -I "$va/vacheck.pyz" toolchain "$project/lean-toolchain" > "$va/toolchain"
+          python3 -I "$va/vacheck.pyz" deps "$project/lake-manifest.json"
+
+      - name: Install the toolchain
+        run: |
+          read -r url sha < "$RUNNER_TEMP/va/toolchain"
+          curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" "$url"
+          echo "$sha  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/lean"
+          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP/lean" --strip-components=1
+          rm "$RUNNER_TEMP/lean.tar.zst"
+          "$RUNNER_TEMP/lean/bin/lean" --version
+
+      - name: Download the export
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: export
+          path: ${{ runner.temp }}/export
+
+      - name: Replay the export through the kernels
+        run: |
+          va="$RUNNER_TEMP/va"
+          lake="$RUNNER_TEMP/lean/bin/lake"
+          export_file="$RUNNER_TEMP/export/export.ndjson"
+          if [[ ! -f "$export_file" || -L "$export_file" ]] || (( $(stat -c %s "$export_file") > MAX_EXPORT )); then
+            echo "::error::The export is missing or larger than 2 GiB."
+            exit 1
+          fi
+          # An empty project of ours: `lake check` runs in it, so nothing of the repository's Lake
+          # configuration is read.
+          work=$(mktemp -d)
+          echo "$work" > "$va/work"
+          printf 'name = "vacheck_empty"\ndefaultTargets = ["Empty"]\n\n[[lean_lib]]\nname = "Empty"\n' \
+            > "$work/lakefile.toml"
+          cd "$work"
+          "$lake" update 2>&1 | python3 -I -c "$VA_SAY" "$va/vacheck.pyz"
+          if ! "$lake" check --from-export "$export_file" --paranoid 2>&1 \
+              | python3 -I -c "$VA_SAY" "$va/vacheck.pyz"; then
+            echo "::error::The kernels rejected the export, or it uses an axiom other than propext, Quot.sound and Classical.choice."
+            exit 1
+          fi
+
+      - name: Export the reference from the toolchain's library
+        run: |
+          # Every declaration in the export whose name the toolchain's library (Init, Std, Lean,
+          # Lake) has, exported from that library with the toolchain's own leanexport code, and what
+          # each depends on. vacheck analyze compares them, so a project cannot redefine Eq or Nat.
+          # The names go through a file, as data: the leanexport command line can neither take
+          # this many nor write names such as _private.Init.Prelude.0.x.
+          va="$RUNNER_TEMP/va"
+          lean="$RUNNER_TEMP/lean"
+          work=$(cat "$va/work")
+          python3 -I -c "$VA_NAMES" "$va/vacheck.pyz" "$RUNNER_TEMP/export/export.ndjson" "$work/names.jsonl"
+          cat > "$work/Reference.lean" <<'EOF'
+          import Lean.Data.Json.Parser
+          import LeanExport.Basic
+
+          open Lean
+
+          /-- A name from the JSON array of its components: strings for `Name.str`, numbers for `Name.num`. -/
+          def nameOf (j : Json) : Except String Name := do
+            let comps ← j.getArr?
+            if comps.isEmpty then throw "a name without components"
+            comps.foldlM (init := .anonymous) fun n c =>
+              match c with
+              | .str s => pure (n.str s)
+              | .num k =>
+                if k.exponent == 0 && k.mantissa ≥ 0 then pure (n.num k.mantissa.toNat)
+                else throw "a name component that is not a natural number"
+              | _ => throw "a name component that is neither a string nor a number"
+
+          def main (args : List String) : IO UInt32 := do
+            let [namesFile] := args | throw <| IO.userError "usage: reference <names file>"
+            initSearchPath (← findSysroot)
+            let env ← importModules (#[`Init, `Std, `Lean, `Lake].map ({ module := · })) {}
+            let mut names := #[]
+            for line in ← IO.FS.lines namesFile do
+              match Json.parse line >>= nameOf with
+              | .ok n => if env.contains n then names := names.push n
+              | .error e => throw <| IO.userError s!"the names file: {e}"
+            LeanExport.dumpEnv env names.toList ["--export-unsafe"]
+            return 0
+          EOF
+          cd "$work"
+          "$lean/bin/lean" -c reference.c Reference.lean
+          "$lean/bin/leanc" -o reference reference.c -lLeanExport
+          if ! env -u LEAN_PATH LEAN_SYSROOT="$lean" LEAN_ABORT_ON_PANIC=1 ./reference names.jsonl \
+              > reference.ndjson 2> reference.log; then
+            python3 -I -c "$VA_SAY" "$va/vacheck.pyz" < reference.log
+            echo "::error::The toolchain's reference could not be exported."
+            exit 1
+          fi
+          echo "The export has $(wc -l < names.jsonl) declarations; the reference is $(stat -c %s reference.ndjson) bytes."
+
+      - name: Analyze
+        run: |
+          va="$RUNNER_TEMP/va"
+          work=$(cat "$va/work")
+          read -r url _ < "$va/toolchain"
+          version=${url%/*}
+          version=${version##*/}
+          if ! python3 -I "$va/vacheck.pyz" analyze \
+            --export "$RUNNER_TEMP/export/export.ndjson" \
+            --reference "$work/reference.ndjson" \
+            --manifest "$GITHUB_WORKSPACE/$MANIFEST" \
+            --source "$GITHUB_WORKSPACE" \
+            --repo "github.com/$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --toolchain "$version" \
+            --kernels "$KERNELS" \
+            --nanoda "$RUNNER_TEMP/lean/bin/nanoda_bin" \
+            > "$va/result.json"; then
+            echo "::error::The check failed: the line above says why."
+            exit 1
+          fi
+          echo "The check passed: result.json is $(stat -c %s "$va/result.json") bytes, sha256 $(sha256sum < "$va/result.json" | cut -d ' ' -f 1)."
+
+      - name: Hand the result to sign
+        id: result
+        run: |
+          va="$RUNNER_TEMP/va"
+          base64 -w0 "$va/result.json" > "$va/result.b64"
+          if (( $(stat -c %s "$va/result.b64") > MAX_RESULT_B64 )); then
+            echo "::error::result.json is larger than 900 KiB in base64."
+            exit 1
+          fi
+          { printf 'result='; cat "$va/result.b64"; echo; } >> "$GITHUB_OUTPUT"
+  sign:
+    name: sign
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Get the checker
+        run: |
+          va="$RUNNER_TEMP/va"
+          mkdir -p "$va"
+          curl -fsSL --proto '=https' --retry 3 -o "$va/vacheck.pyz" "$VACHECK_URL"
+          echo "$VACHECK_SHA256  $va/vacheck.pyz" | sha256sum -c -
+
+      - name: Validate the result
+        run: |
+          va="$RUNNER_TEMP/va"
+          # The output is too large for an environment variable (128 KiB at most on Linux), so it
+          # is written here as a quoted heredoc. It is base64, which holds no `_`, so it cannot end
+          # the heredoc, and job `check` runs nothing of the developer's.
+          cat > "$va/result.b64" <<'VA_RESULT_END'
+          ${{ needs.check.outputs.result }}
+          VA_RESULT_END
+          if ! [[ "$(tr -d '\n' < "$va/result.b64")" =~ ^[A-Za-z0-9+/]+=*$ ]]; then
+            echo "::error::The result from job check is not base64."
+            exit 1
+          fi
+          base64 -d "$va/result.b64" > "$va/received.json"
+          python3 -I "$va/vacheck.pyz" validate "$va/received.json" > result.json
+          if ! cmp -s "$va/received.json" result.json; then
+            echo "::error::The result from job check is not canonical JSON."
+            exit 1
+          fi
+          echo "result.json: sha256 $(sha256sum < result.json | cut -d ' ' -f 1)"
+
+      - name: Sign the result
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: result.json
+          predicate-type: https://verificationalliance.org/attestations/proof-check/v1
+          predicate-path: result.json
+
+      - name: Keep the bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp -- "$BUNDLE" result.sigstore.json
+
+      # Replaces any artifact of that name that another job of the run uploaded.
+      - name: Upload the result
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: osva-proof-result
+          path: |
+            result.json
+            result.sigstore.json
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: error

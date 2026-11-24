@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "project": "tests/fixtures/sorry",
+  "modules": ["Sorry"],
+  "claims": [
+    {"says": "One and one make three.", "theorem": "Sorry.t", "about": "model"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "project": "tests/fixtures/good",
+  "modules": ["Good"],
+  "ships": ["Good"],
+  "claims": [
+    {"says": "f n is either n + 1 or not.", "theorem": "Good.t1", "about": "model"},
+    {"says": "f n is greater than n.", "theorem": "Good.«key never leaves»", "about": "code"}
+  ]
+}
