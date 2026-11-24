@@ -35,14 +35,26 @@ permissions:
   contents: read
 jobs:
   verify:
-    uses: verificationalliance/verify/.github/workflows/lean.yml@<release-sha>
+    uses: verificationalliance/verify/.github/workflows/lean.yml@7b47c8301cf5c0637b3621bf6cb27b59bd06499d # workflow-4
     permissions:
       contents: read
       id-token: write
       attestations: write
 ```
 
-Public repositories on github.com only. Lean 4 v4.35.0 or later, with no Lake dependencies.
+Public repositories on github.com only. Lean 4 v4.35.0 or later, with no Lake dependencies, and
+the project's `.lake` folder not committed. The jobs that check and sign run only on GitHub's
+standard `ubuntu-24.04` runners, never on a larger or self-hosted one.
+
+## Releases
+
+Pin the workflow by its full commit SHA, as above. The current release:
+
+- **workflow-4**, `7b47c8301cf5c0637b3621bf6cb27b59bd06499d`, with vacheck 1.1.2.
+
+Revoked: workflow-1 (`f209d20`), workflow-2 (`4e66300`) and workflow-3 (`7896c82`). Their tags stay
+as history; a result one of them signed shows as needing a new check until the workflow runs again
+on the current release.
 
 Check the parsers locally: `python3 -I tests/test_vacheck.py`
 
