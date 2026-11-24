@@ -2,9 +2,9 @@
 
 Everything here is hostile data: the export comes from a job that ran the developer's code, and the
 checkout is the developer's repository. Nothing in it is run; its files are only hashed or read as
-text, never through a symlink. The build digest covers every build input in the checkout: every file
-in the project folder, and every .lean and Lake file anywhere, and a symlink among them is an error,
-as is a committed .lake in the project folder. Only the project's .lean files of at most 2 MiB,
+text, never through a symlink. The build digest covers every file in the checkout but its .git, a
+symlink by where it points (one into the project, or a symlinked .lean or Lake file, is an error, as is
+one pointing outside the checkout), and a committed .lake in the project folder is an error. Only the project's .lean files of at most 2 MiB,
 outside any folder named .lake or .git, are read as text. Messages name things from the export and
 the manifest, so each goes through text.log_line.
 
@@ -17,6 +17,7 @@ import errno
 import hashlib
 import json
 import os
+import posixpath
 import re
 import stat
 
@@ -116,8 +117,10 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     if not isinstance(printed, dict) or not all(isinstance(printed.get(n), str) for n in wanted):
         raise AnalysisError('the printer did not print every declaration')
     try:
-        shown = {n: _hygiene(printed[n] if n in theorems else _definition(export, n, printed, ctors))
-                 for n in names}
+        shown, terms = {}, {}
+        for n in names:
+            text, term = (printed[n], None) if n in theorems else _definition(export, n, printed, ctors)
+            shown[n], terms[n] = _hygiene(text), None if term is None else _capped(_hygiene(term))
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
 
@@ -129,10 +132,16 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     replaced = []
     hashes = {}
     total = 0
-    for rel, path in _build_inputs(source_dir, prefix) + [(manifest_rel, manifest_file)]:
+    for rel, path, target in _build_inputs(source_dir, prefix) + [(manifest_rel, manifest_file, None)]:
         if rel in hashes:
             continue
-        hashes[rel], size, data = _hash(path, rel, MAX_TOTAL - total, _read_as_text(rel, prefix))
+        if target is not None:                     # a symlink counts by where it points, never followed
+            raw = target.encode('utf-8', errors='surrogateescape')
+            hashes[rel], size, data = _sha256(b'symlink\0' + raw), len(raw), None
+            if size > MAX_TOTAL - total:
+                raise AnalysisError('the build inputs (every file in the checkout and the manifest) are larger than 512 MiB in total')
+        else:
+            hashes[rel], size, data = _hash(path, rel, MAX_TOTAL - total, _read_as_text(rel, prefix))
         total += size
         if data is None:
             continue
@@ -165,12 +174,14 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         for d in defs[c.theorem]:
             _shown(d, 'the definition name %s' % d)
             _shown(shown[d], 'the text of %s' % d, newlines=True)
+            if terms[d] is not None:
+                _shown(terms[d], 'the checked term of %s' % d, newlines=True)
         claims.append({
             'says': c.says,
             'theorem': c.theorem,
             'about': c.about,
             'statement': shown[c.theorem],
-            'defs': [{'name': d, 'text': shown[d], 'source': source(d)} for d in defs[c.theorem]],
+            'defs': [{'name': d, 'text': shown[d], 'source': source(d), 'term': terms[d]} for d in defs[c.theorem]],
             'axioms': axioms[c.theorem],
             'source': source(c.theorem),
         })
@@ -210,8 +221,8 @@ def import_roots(source_dir, project):
     _, prefix = _project(source_dir, project)
     roots = set()
     total = 0
-    for rel, path in _build_inputs(source_dir, prefix):
-        if not _read_as_text(rel, prefix):
+    for rel, path, target in _build_inputs(source_dir, prefix):
+        if target is not None or not _read_as_text(rel, prefix):
             continue
         _, size, data = _hash(path, rel, MAX_TOTAL - total, True)
         total += size
@@ -254,7 +265,7 @@ _NAME = r'(?:[^\s«(){}\[\]:⦃,]|«[^»\n]*»)+'
 _ATTRS = r'(?:@\[[^\]\n]*\][^\S\n]*)*'
 _MODIFIERS = r'(?:(?:private|protected|public|noncomputable|nonrec|unsafe|partial|scoped|local)[^\S\n]+)*'
 _WORD_END = r'(?![^\s(])'
-# A command at the start of a line: namespace, section, mutual, end, or a declaration after any
+# A command at the start of a line: namespace, section, mutual, end, #exit, or a declaration after any
 # attributes and modifiers. No two ways to match the same text, so a hostile file cannot make it
 # backtrack.
 _COMMAND = re.compile(
@@ -263,6 +274,7 @@ _COMMAND = re.compile(
     r'|' + _ATTRS + _MODIFIERS + r'(?P<section>section)(?:[^\S\n]+(?P<section_name>' + _NAME + '))?' + _WORD_END +
     r'|(?P<mutual>mutual)' + _WORD_END +
     r'|(?P<end>end)(?:[^\S\n]+(?P<end_name>' + _NAME + '))?' + _WORD_END +
+    r'|(?P<exit>#exit)' + _WORD_END +
     r'|' + _ATTRS + r'(?P<modifiers>' + _MODIFIERS + ')'
     r'(?:theorem|lemma|def|abbrev|structure|inductive|class(?:[^\S\n]+inductive)?|opaque|axiom|instance)'
     r'[^\S\n]+(?P<declared>' + _NAME + '))', re.MULTILINE)
@@ -356,7 +368,8 @@ def declarations(text):
     """(components of the full name, line) of each declaration in Lean source text, from the
     namespaces open around it: `theorem b` inside `namespace A` is A.b, and `_root_.b` is b. A
     private declaration is left out (Lean gives it another name). From an `end` that closes nothing,
-    or not what is open, on, nothing more is found in the file: its names are not certain."""
+    or not what is open, on, nothing more is found in the file: its names are not certain; nor after
+    `#exit`, after which Lean reads nothing."""
     masked = _mask(text)
     scopes = []  # (kind, name): ('namespace', components), ('section', text or None), ('mutual', None)
     out = []
@@ -373,6 +386,8 @@ def declarations(text):
             scopes.append(('section', m.group('section_name')))
         elif m.group('mutual') is not None:
             scopes.append(('mutual', None))
+        elif m.group('exit') is not None:          # Lean reads nothing after it: what follows was never built
+            return out
         elif m.group('end') is not None:
             name = m.group('end_name')
             closes = scopes[-1] if scopes else None
@@ -397,10 +412,11 @@ def declarations(text):
 # How a definition is shown: as nanoda_bin prints it from the checked export, never from the source,
 # with three changes that only make it readable. An inductive type is shown with its constructors. A
 # definition compiled through recursors or match auxiliaries (structural or well-founded recursion,
-# `match`) is shown by its header, the name and the type, since its body is the compiled term: the
-# source has the definition as written. And a name with macro scopes, which Lean gives a variable a
+# `match`) is shown by its header, the name and the type, since its body is the compiled term; that
+# term, in full (cut at MAX_TEXT, saying so), goes beside it as the definition's `term`. And a name with macro scopes, which Lean gives a variable a
 # macro made (x._@.Mod._hyg.21), is shown as Lean shows it, x✝, numbered if two differ.
-COMPILED_NOTE = '(body compiled; see source)'
+COMPILED_NOTE = '(body compiled; the checked term is below)'
+_MORE_CHARS = '\n\u2026 %d more characters'
 _COMPILED = re.compile(r'(?:^|\.)(?:brecOn|binductionOn|below|rec|recOn|casesOn|match_\d+|_f|_unary|_mutual)$')
 _HYGIENIC = re.compile(r"(?<![^\s(){}\[\]⟨⟩⦃⦄,:@])([^\W\d][\w'!?]*(?:\.(?!_@\.)[^\W\d][\w'!?]*)*)"
                        r"\._@\.[\w'!?.]*?\._hyg\.\d+(?![\w'!?.])")
@@ -508,27 +524,37 @@ def _constructor(export, ctor, text):
 
 
 def _definition(export, name, printed, ctors):
-    """The text shown for one of the project's definitions (see above), at most MAX_TEXT characters
-    when it is made of more than nanoda_bin's text."""
+    """(text, term) for one of the project's definitions (see above): the text shown, at most MAX_TEXT
+    characters when it is made of more than nanoda_bin's text; and the checked term, nanoda_bin's whole
+    text, when the text shows less of it (a compiled definition), else None."""
     text = printed[name]
     kind = export.kind(name)
     if kind == 'inductive':
         lines = [_constructor(export, c, printed[c]) for c in ctors[name]]
         if not lines:
-            return text
+            return text, None
         out = text + '\n' + ('constructor:' if len(lines) == 1 else 'constructors:')
         for i, line in enumerate(lines):
             item = '\n  ' + line.replace('\n', '\n  ')
             left = len(lines) - i - 1
             if len(out) + len(item) + (len(_MORE % left) if left else 0) > MAX_TEXT:
-                return out + _MORE % (left + 1)
+                return out + _MORE % (left + 1), None
             out += item
-        return out
+        return out, None
     if kind == 'def' and any(_COMPILED.search(c) or c.startswith('WellFounded.') for c in value_constants(export, name)):
         head = _header(text)
         if head is not None:
-            return head + '\n  ' + COMPILED_NOTE
-    return text
+            return head + '\n  ' + COMPILED_NOTE, text
+    return text, None
+
+
+def _capped(term):
+    """A checked term of at most MAX_TEXT characters: cut, ending with how many characters were left out."""
+    if len(term) <= MAX_TEXT:
+        return term
+    keep = MAX_TEXT - len(_MORE_CHARS % len(term))
+    return term[:keep] + _MORE_CHARS % (len(term) - keep)
+
 
 def _sha256(data):
     return hashlib.sha256(data).hexdigest()
@@ -576,11 +602,15 @@ def _manifest_file(source_dir, manifest_path):
 
 
 def _build_inputs(source_dir, prefix):
-    """(relpath, path) of every build input in the checkout, in path order: every file in the project
-    folder (C sources for an extern_lib, scripts a lakefile runs, data it reads), and each .lean file
-    and Lake file anywhere, outside the root .git. A project folder that holds .lake raises: Lake
-    builds there, so a committed one could hand the build files that are not hashed. A symlinked
-    input or folder raises: what it points at could be compiled, and is not hashed."""
+    """(relpath, path, link) of every build input in the checkout, in path order: every file, outside the
+    root .git (a lakefile can build from anywhere in it, ../ included, and put its buildDir there).
+    `link` is None for a file. A project folder that holds .lake raises: Lake builds there, so a
+    committed one could hand the build files that are not hashed.
+
+    Symlinks are never followed. In the project folder, and for a .lean or Lake file anywhere, a
+    symlinked file or folder raises: what it points at could be compiled. Elsewhere a symlink counts
+    by where it points (`link`, its target as written), which must be inside the checkout, outside
+    .git; one pointing anywhere else raises, since what it points at is not hashed."""
     lake = _join(prefix, '.lake')
     if os.path.lexists(os.path.join(source_dir, *lake.split('/'))):
         raise AnalysisError('%s is in the repository: Lake builds there, so it must not be committed '
@@ -589,6 +619,20 @@ def _build_inputs(source_dir, prefix):
 
     def fail(e):
         raise AnalysisError('cannot list %s' % os.path.relpath(e.filename or source_dir, source_dir))
+
+    def link(rel, path, compiled):
+        """The target of a symlink that may stand as a build input; AnalysisError for any other."""
+        if compiled:
+            raise AnalysisError(_SYMLINK + rel)
+        try:
+            target = os.readlink(path)
+        except OSError:
+            raise AnalysisError('cannot read %s' % rel) from None
+        where = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target.replace(os.sep, '/')))
+        if (os.path.isabs(target) or where == '..' or where.startswith('../') or where == '.git'
+                or where.startswith('.git/')):
+            raise AnalysisError('a symlink points outside the repository: %s' % rel)
+        return target
 
     out = []
     for dirpath, dirnames, filenames in os.walk(source_dir, onerror=fail):
@@ -600,17 +644,19 @@ def _build_inputs(source_dir, prefix):
             rel = _join(here, d)
             if rel in skip:
                 continue
-            if os.path.islink(os.path.join(dirpath, d)):
-                raise AnalysisError(_SYMLINK + rel)
+            path = os.path.join(dirpath, d)
+            if os.path.islink(path):
+                out.append((rel, path, link(rel, path, in_project or rel == prefix)))
+                continue
             kept.append(d)
         dirnames[:] = kept
         for name in filenames:
-            if in_project or name.endswith('.lean') or name in LAKE_FILES:
-                rel = _join(here, name)
-                path = os.path.join(dirpath, name)
-                if os.path.islink(path):
-                    raise AnalysisError(_SYMLINK + rel)
-                out.append((rel, path))
+            rel = _join(here, name)
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path):
+                out.append((rel, path, link(rel, path, in_project or name.endswith('.lean') or name in LAKE_FILES)))
+            else:
+                out.append((rel, path, None))
     out.sort()
     return out
 
@@ -634,8 +680,8 @@ def _hash(path, rel, budget, as_text):
                 break
             size += len(chunk)
             if size > budget:
-                raise AnalysisError('the build inputs (every file in the project, every .lean and Lake '
-                                    'file, and the manifest) are larger than 512 MiB in total')
+                raise AnalysisError('the build inputs (every file in the checkout and the manifest) '
+                                    'are larger than 512 MiB in total')
             h.update(chunk)
             if text is not None and size <= MAX_FILE:
                 text.append(chunk)

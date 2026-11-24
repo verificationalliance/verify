@@ -85,10 +85,12 @@ def _claim(c):
         _fail('about must be code or model')
     _str(c['statement'], 'statement', 4000, newlines=True)
     for d in _list(c['defs'], 'defs', 0, 20):
-        _keys(d, ('name', 'text', 'source'), 'def')
+        _keys(d, ('name', 'text', 'source', 'term'), 'def')
         _str(d['name'], 'def name')
         _str(d['text'], 'def text', 4000, newlines=True)
         _source(d['source'], 'def source')
+        if d['term'] is not None:  # the checked term, when the text shows less of it
+            _str(d['term'], 'def term', 4000, newlines=True)
     for a in _list(c['axioms'], 'axioms', 0, 3):
         if a not in ALLOWED_AXIOMS:
             _fail('axiom not allowed')

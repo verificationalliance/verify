@@ -224,7 +224,7 @@ check('the statement of Good.t1 is printed by nanoda, without its value',
       '  Or (Eq (Good.f n) (HAdd.hAdd n (OfNat.ofNat 1))) (Ne (Good.f n) (HAdd.hAdd n (OfNat.ofNat 1)))')
 check('the definition of Good.f is printed by nanoda',
       t1.get('defs') == [{'name': 'Good.f', 'text': 'def Good.f (n : Nat) : Nat := HAdd.hAdd n (OfNat.ofNat 1)',
-                          'source': {'path': 'core/Good.lean', 'line': 3}}])
+                          'source': {'path': 'core/Good.lean', 'line': 3}, 'term': None}])
 check('a name with «» is printed',
       by_theorem.get('Good.«key never leaves»', {}).get('statement')
       == 'theorem «Good.key never leaves» (n : Nat) : LT.lt n (Good.f n)')
@@ -262,13 +262,18 @@ for refs_, name in (((REFS['good'], REFS['good']), 'two references that agree ac
 # shows them, x\u271d.
 osva_like = result_of(analyze('good', (('x', 'Good.anyIn_nil', 'model'), ('y', 'Good.pick_lowest', 'model'))))
 osva_defs = {d['name']: (d['text'], d['source']) for c in osva_like.get('claims', []) for d in c['defs']}
+osva_terms = {d['name']: d['term'] for c in osva_like.get('claims', []) for d in c['defs']}
 src = lambda line: {'path': 'core/Good.lean', 'line': line}  # noqa: E731
 check('a structure is shown with its constructor and its fields, by name',
       osva_defs.get('Good.Range') == ('inductive Good.Range : Type 0\nconstructor:\n  Good.Range.mk (lo hi : Nat) : Good.Range', src(15)))
 check('a definition through structural recursion is shown by its header, with its source',
-      osva_defs.get('Good.lowest') == ('def Good.lowest (a\u271d : List Nat) : Nat\n  (body compiled; see source)', src(23)))
+      osva_defs.get('Good.lowest') == ('def Good.lowest (a\u271d : List Nat) : Nat\n  (body compiled; the checked term is below)', src(23)))
+check('... and its checked term, as nanoda_bin prints it, macro-scoped names as Lean shows them',
+      osva_terms.get('Good.lowest') == 'def Good.lowest (a\u271d : List Nat) : Nat := List.brecOn a\u271d Good.lowest._f'
+      and osva_terms.get('Good.pick', '').startswith('def Good.pick (o : Option Nat) : Nat :=\n  Good.pick.match_1')
+      and osva_terms.get('Good.anyIn') is None and osva_terms.get('Good.Range') is None)
 check('a definition through a match is shown by its header, with its source',
-      osva_defs.get('Good.pick') == ('def Good.pick (o : Option Nat) : Nat\n  (body compiled; see source)', src(27)))
+      osva_defs.get('Good.pick') == ('def Good.pick (o : Option Nat) : Nat\n  (body compiled; the checked term is below)', src(27)))
 check('a definition is shown whole, with macro-scoped names as Lean shows them',
       osva_defs.get('Good.anyIn') == ('def Good.anyIn (rs : List Good.Range) (x\u271d : Nat) : Bool :=\n  List.any rs\n'
                                       '    (fun (x\u271d\u00b9 : Good.Range) =>\n    Good.Range.contains x\u271d\u00b9 x\u271d)', src(21)))

@@ -86,7 +86,8 @@ res = {
     'schema': SCHEMA, 'repo': 'github.com/acme/proj', 'commit': 'a' * 40, 'toolchain': 'v4.36.0',
     'checker': '1.0.0', 'project': 'core', 'build_digest': 'b' * 64,
     'claims': [{'says': 'x', 'theorem': 'OSVA.affectedIn_sound', 'about': 'code', 'statement': 'st',
-                'defs': [{'name': 'OSVA.affectedIn', 'text': 'def', 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 40}}],
+                'defs': [{'name': 'OSVA.affectedIn', 'text': 'def', 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 40},
+                          'term': 'def OSVA.affectedIn :=\n  x'}],
                 'axioms': ['propext'],
                 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 56}}],
     'evidence': {'ships': ['OSVACore'], 'replaced': [{'path': 'p', 'line': 3, 'text': '@[extern "x"]'}]},
@@ -124,6 +125,12 @@ check('result def without its source rejected', result_rejected(lambda r: r['cla
 check('result def source .. rejected',
       result_rejected(lambda r: r['claims'][0]['defs'][0]['source'].update(path='a/../b')))
 check('result def source line 0 rejected', result_rejected(lambda r: r['claims'][0]['defs'][0]['source'].update(line=0)))
+check('result def without its term rejected', result_rejected(lambda r: r['claims'][0]['defs'][0].pop('term')))
+check('result def term null accepted', not result_rejected(lambda r: r['claims'][0]['defs'][0].update(term=None)))
+check('result def term 4001 rejected, 4000 with line breaks accepted',
+      result_rejected(lambda r: r['claims'][0]['defs'][0].update(term='a' * 4001))
+      and not result_rejected(lambda r: r['claims'][0]['defs'][0].update(term='a\n' * 2000)))
+check('result def term not a string rejected', result_rejected(lambda r: r['claims'][0]['defs'][0].update(term=7)))
 
 check('result extra key rejected', result_rejected(lambda r: r.update(extra=1)))
 check('result claim extra key rejected', result_rejected(lambda r: r['claims'][0].update(extra=1)))
@@ -141,7 +148,7 @@ check('result statement 4001 rejected', result_rejected(lambda r: r['claims'][0]
 check('result def text 4001 rejected',
       result_rejected(lambda r: r['claims'][0]['defs'][0].update(text='a' * 4001)))
 check('result 21 defs rejected',
-      result_rejected(lambda r: r['claims'][0].update(defs=[{'name': 'n', 'text': 't', 'source': None}] * 21)))
+      result_rejected(lambda r: r['claims'][0].update(defs=[{'name': 'n', 'text': 't', 'source': None, 'term': None}] * 21)))
 check('result 0 claims rejected', result_rejected(lambda r: r.update(claims=[])))
 check('result 21 claims rejected', result_rejected(lambda r: r.update(claims=[r['claims'][0]] * 21)))
 check('result 201 replaced rejected',
@@ -152,7 +159,7 @@ check('result bad schema rejected', result_rejected(lambda r: r.update(schema='x
 check('result about both rejected', result_rejected(lambda r: r['claims'][0].update(about='both')))
 check('result bool line rejected', result_rejected(lambda r: r['claims'][0]['source'].update(line=True)))
 check('result over 1 MB rejected', result_rejected(
-    lambda r: r.update(claims=[dict(r['claims'][0], defs=[{'name': 'n', 'text': 'a' * 4000, 'source': None}] * 20)] * 20)))
+    lambda r: r.update(claims=[dict(r['claims'][0], defs=[{'name': 'n', 'text': 'a' * 4000, 'source': None, 'term': None}] * 20)] * 20)))
 try:
     validate_result([])
     good = False
@@ -174,6 +181,7 @@ TEXT_FIELDS = {
     'statement': lambda r, v: r['claims'][0].update(statement='a' + v),
     'def name': lambda r, v: r['claims'][0]['defs'][0].update(name='a' + v),
     'def text': lambda r, v: r['claims'][0]['defs'][0].update(text='a' + v),
+    'def term': lambda r, v: r['claims'][0]['defs'][0].update(term='a' + v),
     'source path': lambda r, v: r['claims'][0]['source'].update(path='a' + v),
     'def source path': lambda r, v: r['claims'][0]['defs'][0]['source'].update(path='a' + v),
     'replaced path': lambda r, v: r['evidence']['replaced'][0].update(path='a' + v),
@@ -189,7 +197,7 @@ check('a hidden character in any published text field rejected',
        if not result_rejected(lambda r, mut=mut, v=v: mut(r, v))] == [])
 check('a line break rejected outside statements and def texts',
       [f for f, mut in TEXT_FIELDS.items()
-       if f not in ('statement', 'def text') and not result_rejected(lambda r, mut=mut: mut(r, '\nb'))] == [])
+       if f not in ('statement', 'def text', 'def term') and not result_rejected(lambda r, mut=mut: mut(r, '\nb'))] == [])
 check('a line break accepted in a statement and a def text',
       not result_rejected(lambda r: TEXT_FIELDS['statement'](r, '\nb'))
       and not result_rejected(lambda r: TEXT_FIELDS['def text'](r, '\nb')))
@@ -224,7 +232,7 @@ def of_size(n):
         if len(r['claims'][-1]['defs']) == 20:
             r['claims'].append(dict(copy.deepcopy(res['claims'][0]), defs=[]))
             continue
-        r['claims'][-1]['defs'].append({'name': 'n', 'text': '', 'source': None})
+        r['claims'][-1]['defs'].append({'name': 'n', 'text': '', 'source': None, 'term': None})
         d = r['claims'][-1]['defs'][-1]
         d['text'] = 'a' * max(0, min(4000, n - canonical_size(r)))
     return r
@@ -715,7 +723,7 @@ def valid(r):
     return True
 
 
-F_DEF = {'name': 'Good.f', 'text': '<pp Good.f>', 'source': {'path': 'core/Good.lean', 'line': 3}}
+F_DEF = {'name': 'Good.f', 'text': '<pp Good.f>', 'source': {'path': 'core/Good.lean', 'line': 3}, 'term': None}
 good_tree = attempt(lambda: source_tree('good', [('Never \u202eleaks\x07.', 'Good.«key never leaves»', 'code'),
                                                  ('f is n + 1, or not.', 'Good.t1', 'model')], ships=['Good']))
 good_res = attempt(lambda: run('good', tree=good_tree)) or {}
@@ -825,8 +833,8 @@ def append(rel, text=' '):
 
 
 ds = attempt(lambda: digests(append('README.md'), append('core/Good.lean', '\n-- x\n')))
-check('build digest changes with a lean file and not with a README outside the project',
-      ds is not None and is_sha256(ds[0]) and ds[0] == ds[1] != ds[2])
+check('build digest changes with any file of the checkout, a README outside the project too',
+      ds is not None and is_sha256(ds[0]) and len(set(ds)) == 3)
 # Every build input in the checkout: every file in the project folder (C sources for an extern_lib,
 # scripts and data a lakefile uses), and every .lean and Lake file anywhere: Lake compiles sources
 # from outside the project (srcDir := "../src") and from folders named .lake below the project's own.
@@ -834,13 +842,15 @@ covered = ('core/lakefile.toml', 'core/lake-manifest.json', 'core/lean-toolchain
            'core/lakefile.lean', 'core/Good/Sub.lean', 'core/Good/.lake/Y.lean', 'Top.lean', 'src/X.lean',
            'other/lakefile.toml', 'other/lake-manifest.json', 'other/lean-toolchain', 'core/.git/Z.lean',
            'core/ffi/shim.c', 'core/include/shim.h', 'core/build.sh', 'core/README.md', 'core/Good.olean',
-           'core/.hidden/data.bin', 'core/Good/.lake/build/lib.a')
+           'core/.hidden/data.bin', 'core/Good/.lake/build/lib.a',
+           # vacheck 1.1.3: every file of the checkout, outside the project too (a lakefile's buildDir or an
+           # extern_lib can reach ../ for its sources)
+           'other/README.md', 'other/shim.c', 'build/out.o', '.github/workflows/x.yml', 'other/.lake/lib.a')
 ds = attempt(lambda: digests(*[append(rel) for rel in covered]))
-check('build digest covers every file in the project, every lean and lake file in the checkout, and the manifest',
+check('build digest covers every file in the checkout and the manifest',
       ds is not None and len(set(ds)) == len(covered) + 1)
-ds = attempt(lambda: digests(append('.git/X.lean'), append('other/README.md'), append('other/shim.c')))
-check('build digest leaves out the root .git and other files outside the project',
-      ds is not None and len(set(ds)) == 1)
+ds = attempt(lambda: digests(append('.git/X.lean'), append('.git/objects/ab/cd')))
+check('build digest leaves out the root .git only', ds is not None and len(set(ds)) == 1)
 
 
 def committed_lake(rel, project='core'):
@@ -936,20 +946,35 @@ check('a dangling symlinked lean file raises',
       with_symlink('core/D.lean', A_LEAN + '.gone') == SYMLINKS + 'core/D.lean')
 check('a symlinked lean file outside the project raises', with_symlink('src/X.lean', A_LEAN) == SYMLINKS + 'src/X.lean')
 check('a symlinked folder raises', with_symlink('core/Ab', OUTSIDE) == SYMLINKS + 'core/Ab')
-check('a symlinked folder outside the project raises', with_symlink('src', OUTSIDE) == SYMLINKS + 'src')
+check('a symlinked folder outside the project, pointing outside the checkout, raises',
+      with_symlink('src', OUTSIDE) == 'a symlink points outside the repository: src')
 check('a symlinked lake file raises', with_symlink('core/lean-toolchain', A_LEAN) == SYMLINKS + 'core/lean-toolchain')
 check('a symlinked manifest file raises',
       with_symlink('.verificationalliance.json', A_LEAN) == SYMLINKS + '.verificationalliance.json')
 
 
-def harmless_symlink():
+def inside_symlink():
+    """Outside the project, a symlink into the checkout counts by where it points, and is never followed (as
+    OSVA Monitor's app/Sources/OSVACore/osva_shim.c -> ../../../core/ffi/osva_shim.c)."""
     tree = source_tree('good', [('x', 'Good.t1', 'model')])
-    before = run('good', tree=tree)['build_digest']
-    os.symlink(A_LEAN, os.path.join(tree[0], 'README.md'))
-    return run('good', tree=tree)['build_digest'] == before
+    root = tree[0]
+    out = [run('good', tree=tree)['build_digest']]
+    write(os.path.join(root, 'core', 'ffi', 'shim.c'), 'int x;\n'); write(os.path.join(root, 'core', 'ffi', 'other.c'), 'int y;\n')
+    os.makedirs(os.path.join(root, 'app', 'src'))
+    os.symlink('../../core/ffi/shim.c', os.path.join(root, 'app', 'src', 'shim.c'))
+    out.append(run('good', tree=tree)['build_digest'])
+    os.remove(os.path.join(root, 'app', 'src', 'shim.c')); os.symlink('../../core/ffi/other.c', os.path.join(root, 'app', 'src', 'shim.c'))
+    out.append(run('good', tree=tree)['build_digest'])
+    os.symlink('../core/ffi', os.path.join(root, 'app', 'ffi'))              # a folder: its link counts, its files once, where they are
+    out.append(run('good', tree=tree)['build_digest'])
+    return len(set(out)) == 4
 
 
-check('a symlink that is no build input is ignored', attempt(harmless_symlink) is True)
+check('a symlink outside the project into the checkout counts by its target, never followed', attempt(inside_symlink) is True)
+check('a symlink outside the project pointing outside the checkout raises',
+      with_symlink('README.md', A_LEAN) == 'a symlink points outside the repository: README.md'
+      and with_symlink('docs/x', '../../x') == 'a symlink points outside the repository: docs/x'
+      and with_symlink('docs/y', '/etc/passwd') == 'a symlink points outside the repository: docs/y')
 
 
 def symlinked_project():
@@ -976,10 +1001,11 @@ def manifest_elsewhere():
     out.append(run('good', tree=tree, manifest_path='cfg/m.json')['build_digest'])
     write(os.path.join(root, '.verificationalliance.json'), '{}')
     out.append(run('good', tree=tree, manifest_path='cfg/m.json')['build_digest'])
-    return out[0] != out[1] == out[2]
+    return out[0] != out[1] != out[2] != out[0]
 
 
-check('build digest hashes exactly the manifest file it is given', attempt(manifest_elsewhere) is True)
+check('build digest hashes the manifest file it is given, and a file at the default path like any other',
+      attempt(manifest_elsewhere) is True)
 check('a manifest path outside the checkout rejected',
       analysis_error(lambda: run('good', ['Good.t1'], manifest_path='../m.json')) is not None)
 
@@ -1157,6 +1183,13 @@ check('a private declaration of the name is not its source (Lean gives it anothe
 check('after an end that closes what is not open, nothing more in that file is a source',
       attempt(lambda: source_of({'core/A.lean': 'namespace Bad\nend Worse\nnamespace Good\ntheorem t1 : True := trivial\nend Good\n'}))
       == list(GOOD_SRC))
+check('#exit at the start of a line ends the file: a decoy after it is no source',
+      attempt(lambda: source_of({'core/Good.lean': 'namespace Good\nmy_theorem_macro t1\ndef f := 1\n#exit\ntheorem t1 : True := trivial\n'
+                                                     'def g := 2\nend Good\n'})) == [None, at('core/Good.lean', 3)]
+      and attempt(lambda: va.declarations('namespace OSVA\nmake_theorem t\n#exit\ntheorem OSVA.t : True := trivial\n')) == []
+      and attempt(lambda: va.declarations('-- #exit\n/- \n#exit -/\ndef s := "\n#exit"\ntheorem t : True := trivial\n  #exitx\ntheorem u : True := trivial\n'))
+      == [(('s',), 4), (('t',), 6), (('u',), 8)]
+      and attempt(lambda: va.declarations('theorem a : True := trivial\n  #exit\ntheorem b : True := trivial\n')) == [(('a',), 1)])
 check('a theorem with universe parameters, t1.{u}, has its source',
       attempt(lambda: source_of({'core/Good.lean': 'namespace Good\ntheorem t1.{u} : True := trivial\ndef f := 1\nend Good\n'}))
       == [at('core/Good.lean', 2), at('core/Good.lean', 3)])
@@ -1207,6 +1240,11 @@ def shown(over=None, claims=('Good.anyIn_nil', 'Good.pick_lowest')):
     return {d['name']: d['text'] for c in r['claims'] for d in c['defs']}
 
 
+def terms(over=None, claims=('Good.anyIn_nil', 'Good.pick_lowest')):
+    r = run('good', claims, pp=nano(over))
+    return {d['name']: d['term'] for c in r['claims'] for d in c['defs']}
+
+
 sh = attempt(shown) or {}
 check('a structure is shown with its constructor and the fields, named, of the checked export',
       sh.get('Good.Range') == 'inductive Good.Range : Type 0\nconstructor:\n  Good.Range.mk (lo hi : Nat) : Good.Range')
@@ -1215,14 +1253,14 @@ check('the constructor printer is asked for, and only for inductive types',
       == ['Good.anyIn_nil', 'Good.t1', 'Good.Range', 'Good.anyIn', 'Good.f', 'Good.Range.mk'])
 check('a definition through structural recursion is shown by its header',
       sh.get('Good.lowest') == 'def Good.lowest (a✝ : List Nat) : Nat\n  ' + va.COMPILED_NOTE
-      and va.COMPILED_NOTE == '(body compiled; see source)')
+      and va.COMPILED_NOTE == '(body compiled; the checked term is below)')
 check('a definition through a match is shown by its header',
       sh.get('Good.pick') == 'def Good.pick (o : Option Nat) : Nat\n  ' + va.COMPILED_NOTE)
 check('a definition compiled through nothing is shown whole, its macro-scoped names as Lean shows them',
       sh.get('Good.anyIn') == 'def Good.anyIn (rs : List Good.Range) (x✝ : Nat) : Bool :=\n  List.any rs\n'
       '    (fun (x✝¹ : Good.Range) =>\n    Good.Range.contains x✝¹ x✝)')
 check('Good.f is shown whole', (attempt(lambda: run('good', ['Good.t1'], pp=nano())) or {}).get('claims', [{}])[0].get('defs')
-      == [{'name': 'Good.f', 'text': NANO['Good.f'], 'source': at('core/Good.lean', 3)}])
+      == [{'name': 'Good.f', 'text': NANO['Good.f'], 'source': at('core/Good.lean', 3), 'term': None}])
 for why, text in (('a string in it', 'def Good.lowest (s : Foo ":= x") : Nat := List.brecOn s Good.lowest._f'),
                   ('a string with := in it, outside brackets', 'def Good.lowest : Foo "x := y" := List.brecOn s Good.lowest._f'),
                   ('a let in it', 'def Good.lowest (a : let n : Nat := 3; Fin n) : Nat := List.brecOn a Good.lowest._f'),
@@ -1260,10 +1298,28 @@ check('a constructor without parameters is shown with its fields, one with param
           ('Exists.intro', 'constructor Exists.intro.{u} {α : Sort u} {p : α → Prop} (w : α) : p w → Exists p'))]
       == ['Nat.succ (n : Nat) : Nat', 'Option.some.{u} {α : Type u} : α → Option α', 'Option.some : α → Option α',
           'Exists.intro.{u} {α : Sort u} {p : α → Prop} (w : α) : p w → Exists p'])
+tm = attempt(terms) or {}
+check('a compiled definition carries its checked term in full, names shown as Lean shows them; others none',
+      tm.get('Good.lowest') == va._hygiene(NANO['Good.lowest']) and tm.get('Good.pick') == va._hygiene(NANO['Good.pick'])
+      and tm.get('Good.anyIn') is None and tm.get('Good.Range') is None and 'Good.lowest' in tm)
+long_body = NANO['Good.lowest'] + ' ' + 'x' * 5000
+
+
+def long_term():
+    return terms({'Good.lowest': long_body})['Good.lowest']
+
+
+lt = attempt(long_term) or ''
+check('a checked term over 4,000 characters is cut there, saying how many characters are left out',
+      len(lt) == 4000 and lt.startswith(va._hygiene(long_body)[:200]) and re.search(r'\n\u2026 (\d+) more characters$', lt) is not None
+      and int(re.search(r'(\d+) more characters$', lt).group(1)) == len(va._hygiene(long_body)) - len(lt.rsplit('\n', 1)[0]))
+check('the statement of a theorem has no term', all('term' not in c for c in (attempt(lambda: run('good', ['Good.t1'])) or {}).get('claims', [{}])))
+
 
 def many_constructors():
     printed = dict(NANO, **{'Good.Range.mk': 'constructor Good.Range.mk : ' + 'Nat → ' * 30 + 'Good.Range'})
-    text = va._definition(good, 'Good.Range', printed, {'Good.Range': ['Good.Range.mk'] * 100})
+    text, term = va._definition(good, 'Good.Range', printed, {'Good.Range': ['Good.Range.mk'] * 100})
+    assert term is None
     return len(text) <= 4000, text.endswith('\n  … and %d more' % (100 - text.count('\n  Good.Range.mk'))), text.count('\n  Good.Range.mk')
 
 
@@ -1276,7 +1332,9 @@ def compiled_through(*consts):
     saved = va.value_constants
     va.value_constants = lambda env, name: frozenset(consts)
     try:
-        return va._definition(good, 'Good.f', {'Good.f': 'def Good.f :\n  Nat → Nat :=\n  Nat.succ _'}, {})
+        text, term = va._definition(good, 'Good.f', {'Good.f': 'def Good.f :\n  Nat → Nat :=\n  Nat.succ _'}, {})
+        assert term == (None if text == 'def Good.f :\n  Nat → Nat :=\n  Nat.succ _' else 'def Good.f :\n  Nat → Nat :=\n  Nat.succ _')
+        return text
     finally:
         va.value_constants = saved
 
