@@ -458,6 +458,362 @@ check('export line of 64 MB accepted', attempt(lambda: vx.load_export(export_fil
 FIRST = HEAD + b'a' + TAIL
 check('export line over 64 MB rejected', export_rejected(
     [META, FIRST + b' ' * (MAX_LINE + 1 - len(FIRST)) + NAME_X.encode()]))
+
+# Supported toolchains.
+try:
+    from vacheck import toolchain as vt  # noqa: E402
+except ImportError as e:
+    print('      cannot import vacheck.toolchain: %s' % e)
+    vt = None
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RELEASES = 'https://github.com/leanprover/lean4/releases/download/'
+T35 = ('v4.35.0', RELEASES + 'v4.35.0/lean-4.35.0-linux.tar.zst',
+       '7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d')
+T36 = ('v4.36.0', RELEASES + 'v4.36.0/lean-4.36.0-linux.tar.zst',
+       '2b7ab1ed8b92d2e6abfaf41344823b510064dbc9c0260cac73eb496ab2dea6eb')
+check('toolchain lookup gives the pinned release tarballs',
+      attempt(lambda: [tuple(vt.lookup(v)) for v in ('v4.35.0', 'v4.36.0')]) == [T35, T36]
+      and attempt(lambda: (lambda t: (t.version, t.url, t.sha256))(vt.lookup('v4.36.0'))) == T36)
+check('toolchain lookup of anything else is None',
+      attempt(lambda: [vt.lookup(v) for v in ('v4.34.0', '4.36.0', 'v4.36', 'leanprover/lean4:v4.36.0',
+                                              'v4.36.0-rc1', 'v4.36.0 ', '', None)]) == [None] * 8)
+
+
+def toolchain_table():
+    """Every entry: v4.35.0 or later, the official linux x86_64 tarball, a sha256; and lookup agrees."""
+    with open(os.path.join(ROOT, 'vacheck', 'toolchains.json'), encoding='utf-8') as f:
+        table = json.load(f)
+    for v, entry in table.items():
+        m = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', v)
+        if not m or tuple(map(int, m.groups())) < (4, 35, 0) or set(entry) != {'url', 'sha256'}:
+            return False
+        if entry['url'] != RELEASES + '%s/lean-%s-linux.tar.zst' % (v, v[1:]) or not is_sha256(entry['sha256']):
+            return False
+        if tuple(vt.lookup(v)) != (v, entry['url'], entry['sha256']):
+            return False
+    return len(table) >= 2
+
+
+check('toolchain table holds official tarballs from v4.35.0 on', attempt(toolchain_table) is True)
+
+
+def toolchain_from_zip():
+    """The checker ships as a zip: the table must be readable from inside one."""
+    import subprocess
+    import zipfile
+    path = os.path.join(TMP, 'vacheck.zip')
+    with zipfile.ZipFile(path, 'w') as z:
+        for f in ('__init__.py', 'toolchain.py', 'toolchains.json'):
+            z.write(os.path.join(ROOT, 'vacheck', f), 'vacheck/' + f)
+    out = subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); '
+                          'from vacheck.toolchain import lookup; print(lookup("v4.36.0").sha256)', path],
+                         capture_output=True, text=True, cwd=TMP)
+    return out.stdout.strip()
+
+
+check('toolchain table readable from a zip', attempt(toolchain_from_zip) == T36[2])
+
+# Analysis: an export against the toolchain's reference, the manifest and the source as text.
+try:
+    from vacheck import analyze as va  # noqa: E402
+except ImportError as e:
+    print('      cannot import vacheck.analyze: %s' % e)
+    va = None
+from vacheck import VERSION  # noqa: E402
+
+MODULES = {'good': 'Good', 'sorry': 'Sorry', 'axiom': 'Axiom', 'native': 'Native', 'fakeeq': 'FakeEq',
+           'replaced': 'Replaced'}
+REPO, COMMIT, KERNELS = 'github.com/acme/proj', 'c' * 40, ['lean', 'nanoda']
+MB2 = 2 * 1024 * 1024
+_serial = iter(range(10 ** 6))
+
+
+def fresh(name):
+    return os.path.join(TMP, '%d-%s' % (next(_serial), name))
+
+
+def write(path, text, mode='w'):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, mode, encoding='utf-8') as f:
+        f.write(text)
+
+
+def printer(names):
+    return {n: '<pp %s>' % n for n in names}
+
+
+def reference(case, own, change=lambda name, record: False, drop=()):
+    """What the toolchain's own export of the fixture's library names gives: the fixture's export
+    without its own declarations (those in namespace `own`) and without the names in `drop`.
+    `change(name, record)` may alter a declaration's record, and returns True if it did."""
+    names = {0: None}
+    path = fresh(case + '-reference.ndjson')
+    with open(os.path.join(FIXTURES, case + '.ndjson'), encoding='utf-8') as f, \
+            open(path, 'w', encoding='utf-8') as out:
+        for line in f:
+            o = json.loads(line)
+            if 'in' in o:
+                part = o['str'] if 'str' in o else o['num']
+                comp = part['str'] if 'str' in o else str(part['i'])
+                pre = names[part['pre']]
+                names[o['in']] = comp if pre is None else pre + '.' + comp
+            decls = [names[o[k]['name']] for k in ('axiom', 'def', 'thm', 'opaque', 'quot') if k in o]
+            if 'inductive' in o:
+                decls = [names[r['name']] for k in ('types', 'ctors', 'recs') for r in o['inductive'][k]]
+            if any(n == own or n.startswith(own + '.') or n in drop for n in decls):
+                continue
+            if decls and change(decls[0], o):
+                line = json.dumps(o) + '\n'
+            out.write(line)
+    return vx.load_export(path)
+
+
+refs = {case: attempt(lambda case=case: reference(case, MODULES[case])) for case in MODULES if case != 'fakeeq'}
+
+
+def source_tree(case, claims, project='core', ships=()):
+    """A checkout: the fixture's Lake project in folder `project`, the manifest at the root.
+    `claims` holds (says, theorem, about). Returns (root, manifest)."""
+    root = fresh('repo')
+    shutil.copytree(os.path.join(FIXTURES, case), os.path.join(root, project),
+                    ignore=shutil.ignore_patterns('.lake'), dirs_exist_ok=True)
+    raw = json.dumps({'version': 1, 'project': project, 'modules': [MODULES[case]], 'ships': list(ships),
+                      'claims': [{'says': s, 'theorem': t, 'about': a} for s, t, a in claims]}).encode()
+    with open(os.path.join(root, '.verificationalliance.json'), 'wb') as f:
+        f.write(raw)
+    return root, parse_manifest(raw)
+
+
+def run(case, theorems=(), tree=None, ref=None, export=None, pp=printer, repo=REPO):
+    """analyze on the fixture's export and its reference, with a new source tree unless `tree` is given."""
+    root, manifest = tree or source_tree(case, [('x', t, 'model') for t in theorems])
+    return va.analyze(envs[case] if export is None else export, refs[case] if ref is None else ref,
+                      manifest, root, repo, COMMIT, 'v4.36.0', KERNELS, pp)
+
+
+def analysis_error(fn):
+    """The message of the AnalysisError that fn raises; None if it returns or raises anything else."""
+    try:
+        fn()
+    except Exception as e:
+        if va is not None and isinstance(e, va.AnalysisError):
+            return str(e)
+        print('      %s: %s' % (type(e).__name__, e))
+        return None
+    print('      no AnalysisError')
+    return None
+
+
+def rejected_with(case, theorems, *needles, **kw):
+    msg = analysis_error(lambda: run(case, theorems, **kw))
+    if msg is not None and not all(n in msg for n in needles):
+        print('      message: %s' % msg)
+        return False
+    return msg is not None
+
+
+def valid(r):
+    try:
+        validate_result(r)
+    except Exception as e:
+        print('      %s: %s' % (type(e).__name__, e))
+        return False
+    return True
+
+
+good_tree = attempt(lambda: source_tree('good', [('Never ‮leaks\x07.', 'Good.«key never leaves»', 'code'),
+                                                 ('f is n + 1, or not.', 'Good.t1', 'model')], ships=['Good']))
+good_res = attempt(lambda: run('good', tree=good_tree)) or {}
+gc = good_res.get('claims') or [{}, {}]
+check('good passes', valid(good_res)
+      and [c.get('theorem') for c in gc] == ['Good.«key never leaves»', 'Good.t1']
+      and [c.get('source') for c in gc]
+      == [{'path': 'core/Good.lean', 'line': 7}, {'path': 'core/Good.lean', 'line': 5}])
+check('good statements, defs and axioms',
+      [(c.get('statement'), c.get('defs'), c.get('axioms')) for c in gc]
+      == [('<pp Good.«key never leaves»>', [{'name': 'Good.f', 'text': '<pp Good.f>'}], []),
+          ('<pp Good.t1>', [{'name': 'Good.f', 'text': '<pp Good.f>'}], ['Classical.choice', 'Quot.sound', 'propext'])])
+check('good says plain and about as declared',
+      [(c.get('says'), c.get('about')) for c in gc] == [('Never leaks.', 'code'), ('f is n + 1, or not.', 'model')])
+check('good carries the run and the evidence',
+      {k: good_res.get(k)
+       for k in ('schema', 'repo', 'commit', 'toolchain', 'checker', 'project', 'kernels', 'evidence')}
+      == {'schema': SCHEMA, 'repo': REPO, 'commit': COMMIT, 'toolchain': 'v4.36.0', 'checker': VERSION,
+          'project': 'core', 'kernels': KERNELS, 'evidence': {'ships': ['Good'], 'replaced': []}}
+      and is_sha256(good_res.get('build_digest')))
+
+check('sorry rejected', rejected_with('sorry', ['Sorry.t'], 'Sorry.t', 'sorryAx'))
+check('axiom rejected', rejected_with('axiom', ['Axiom.t'], 'Axiom.t', 'Axiom.magic'))
+# Lean v4.35.0 and later have no Lean.ofReduceBool: native_decide declares an axiom of its own instead.
+check('native rejected', rejected_with('native', ['Native.t'], 'Native.t._native.native_decide.ax_1_1'))
+fake_msg = analysis_error(lambda: run('fakeeq', ['FakeEq.t'], ref=good))
+check('fakeeq rejected', fake_msg is not None and re.search(r'(?<![\w.])Eq(?![\w.])', fake_msg) is not None)
+check('missing theorem rejected', rejected_with('good', ['Good.nope'], 'Good.nope'))
+check('definition claimed as theorem rejected', rejected_with('good', ['Good.f'], 'Good.f'))
+
+# The digest names the constants a declaration uses without covering them, so every name the export
+# and the reference share must be compared, not only those a claimed type mentions: instLTNat is the
+# same declaration whatever Nat.lt is.
+check('the type of Good.«key never leaves» does not mention Nat.lt',
+      'Nat.lt' not in (attempt(lambda: vx.constants_in_type(good, 'Good.«key never leaves»')) or {'Nat.lt'}))
+
+
+def other_nat_lt(name, record):
+    if name != 'Nat.lt':
+        return False
+    record['def']['value'] = record['def']['type']
+    return True
+
+
+check('a mismatch in a declaration no claimed type mentions still rejects',
+      rejected_with('good', ['Good.«key never leaves»'], 'Nat.lt',
+                    ref=attempt(lambda: reference('good', 'Good', change=other_nat_lt))))
+check('an allowed axiom the reference lacks rejected',
+      rejected_with('good', ['Good.t1'], 'propext', ref=attempt(lambda: reference('good', 'Good', drop={'propext'}))))
+
+rep = attempt(lambda: run('replaced', ['Replaced.double_eq'])) or {}
+check('replaced listed', valid(rep) and rep['evidence']['replaced']
+      == [{'path': 'core/Replaced.lean', 'line': 5, 'text': '@[implemented_by doubleImpl]'}])
+
+
+def long_replaced():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    write(os.path.join(root, 'core', 'Good.lean'), '\n   @[extern "⁦%s"] opaque g : Nat\n' % ('a' * 300), 'a')
+    return run('good', tree=(root, manifest))['evidence']['replaced']
+
+
+check('replaced lines trimmed to 160 plain characters',
+      attempt(long_replaced) == [{'path': 'core/Good.lean', 'line': 11, 'text': ('@[extern "' + 'a' * 300)[:160]}])
+
+
+def with_file(rel, text):
+    """analyze on a new good tree with one more file in it."""
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    write(os.path.join(root, rel), text)
+    return run('good', tree=(root, manifest))
+
+
+check('200 replaced lines listed, 201 rejected',
+      len((attempt(lambda: with_file('core/M.lean', '@[extern "x"] opaque y : Nat\n' * 200)) or {})
+          .get('evidence', {}).get('replaced', ())) == 200
+      and 'implemented_by, extern or csimp' in (
+          analysis_error(lambda: with_file('core/M.lean', '@[extern "x"] opaque y : Nat\n' * 201)) or ''))
+
+
+def many_attributes():
+    import time
+    start = time.monotonic()
+    r = with_file('core/A.lean', '@[a]' * 32 + ' x\n')
+    return r['claims'][0]['source'], time.monotonic() - start < 10
+
+
+check('a line of many attributes is scanned without backtracking',
+      attempt(many_attributes) == ({'path': 'core/Good.lean', 'line': 5}, True))
+
+
+def digests(*edits):
+    """The build digest of a new good tree, then again after each edit(root)."""
+    tree = source_tree('good', [('x', 'Good.t1', 'model')])
+    out = [run('good', tree=tree)['build_digest']]
+    for edit in edits:
+        edit(tree[0])
+        out.append(run('good', tree=tree)['build_digest'])
+    return out
+
+
+def append(rel, text=' '):
+    return lambda root: write(os.path.join(root, rel), text, 'a')
+
+
+ds = attempt(lambda: digests(append('README.md'), append('core/README.md'), append('core/Good.lean', '\n-- x\n')))
+check('build digest changes with a lean file and not with README.md',
+      ds is not None and is_sha256(ds[0]) and ds[0] == ds[1] == ds[2] != ds[3])
+covered = ('core/lakefile.toml', 'core/lake-manifest.json', 'core/lean-toolchain', '.verificationalliance.json',
+           'core/lakefile.lean', 'core/Good/Sub.lean')
+ds = attempt(lambda: digests(*[append(rel) for rel in covered]))
+check('build digest covers the lake files, the manifest and every lean file',
+      ds is not None and len(set(ds)) == len(covered) + 1)
+ds = attempt(lambda: digests(append('core/.lake/build/X.lean'), append('core/Good/.lake/Y.lean'),
+                             append('core/Good.olean'), append('Top.lean')))
+check('build digest leaves out .lake, other files and files outside the project',
+      ds is not None and len(set(ds)) == 1)
+
+OUTSIDE = fresh('outside')
+write(os.path.join(OUTSIDE, 'A.lean'), 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n')
+
+
+def outside_reads(prepare):
+    """(source of Good.t1, replaced, digest unchanged) after prepare(project folder)."""
+    tree = source_tree('good', [('x', 'Good.t1', 'model')])
+    before = run('good', tree=tree)['build_digest']
+    prepare(os.path.join(tree[0], 'core'))
+    r = run('good', tree=tree)
+    return r['claims'][0]['source'], r['evidence']['replaced'], r['build_digest'] == before
+
+
+UNREAD = ({'path': 'core/Good.lean', 'line': 5}, [], True)
+check('a symlinked lean file is not read',
+      attempt(lambda: outside_reads(lambda p: os.symlink(os.path.join(OUTSIDE, 'A.lean'), os.path.join(p, 'A.lean'))))
+      == UNREAD)
+check('a symlinked folder is not followed',
+      attempt(lambda: outside_reads(lambda p: os.symlink(OUTSIDE, os.path.join(p, 'Ab')))) == UNREAD)
+
+
+def link_toolchain(project):
+    """Replaces lean-toolchain with a symlink to a copy outside: same text, so only skipping it shows."""
+    shutil.copy(os.path.join(project, 'lean-toolchain'), os.path.join(OUTSIDE, 'lean-toolchain'))
+    os.remove(os.path.join(project, 'lean-toolchain'))
+    os.symlink(os.path.join(OUTSIDE, 'lean-toolchain'), os.path.join(project, 'lean-toolchain'))
+
+
+check('a symlinked lake file is not read', attempt(lambda: outside_reads(link_toolchain)[2]) is False)
+BIG = 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
+check('a lean file over 2 MB is not read',
+      attempt(lambda: outside_reads(lambda p: write(os.path.join(p, 'A.lean'), BIG + ' ' * (MB2 + 1 - len(BIG)))))
+      == UNREAD)
+check('a lean file of 2 MB is read',
+      attempt(lambda: outside_reads(lambda p: write(os.path.join(p, 'A.lean'), BIG + ' ' * (MB2 - len(BIG)))))
+      == ({'path': 'core/A.lean', 'line': 1},
+          [{'path': 'core/A.lean', 'line': 2, 'text': '@[extern "x"] opaque y : Nat'}], False))
+
+
+def symlinked_project():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    os.rename(os.path.join(root, 'core'), os.path.join(OUTSIDE, 'core'))
+    os.symlink(os.path.join(OUTSIDE, 'core'), os.path.join(root, 'core'))
+    return run('good', tree=(root, manifest))
+
+
+check('a symlinked project folder rejected', analysis_error(symlinked_project) is not None)
+
+
+def no_source():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    os.remove(os.path.join(root, 'core', 'Good.lean'))
+    return run('good', tree=(root, manifest))
+
+
+nosrc = attempt(no_source) or {}
+check('source null when no file has the theorem', valid(nosrc) and nosrc['claims'][0]['source'] is None)
+
+
+def no_manifest_file():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    os.remove(os.path.join(root, '.verificationalliance.json'))
+    return run('good', tree=(root, manifest))
+
+
+check('a missing manifest file rejected', analysis_error(no_manifest_file) is not None)
+check('a printer that leaves out a name rejected',
+      analysis_error(lambda: run('good', ['Good.t1'], pp=lambda names: {})) is not None)
+check('an invalid result raises AnalysisError',
+      analysis_error(lambda: run('good', ['Good.t1'], repo='x/y')) is not None)
+dangling = attempt(lambda: vx.load_export(export_file(
+    [META, NAME_X, '{"in":2,"str":{"pre":0,"str":"t"}}', SORT, '{"ie":1,"const":{"name":1,"us":[]}}',
+     '{"thm":{"name":2,"levelParams":[],"type":1,"value":1,"all":[2]}}'])))
+check('an export error raises AnalysisError',
+      analysis_error(lambda: run('good', ['t'], export=dangling, ref=dangling)) is not None)
 shutil.rmtree(TMP)
 
 if failures:
