@@ -1,0 +1,5 @@
+name = "forge"
+defaultTargets = ["Forge"]
+
+[[lean_lib]]
+name = "Forge"

@@ -14,10 +14,12 @@
 #   and everything it produces is untrusted.
 # - `check` runs nothing from the repository and loads nothing that `build` made but the export,
 #   as data: it replays the export through the official toolchain's kernels and compares it with
-#   the toolchain's own library. It has no id-token either.
+#   the toolchain's own libraries. It has no id-token either. Every native tool that reads the
+#   export or names from it runs in a bwrap sandbox: no network, no environment, none of the
+#   runner's files, only its inputs bound read-only.
 # - `sign` runs no Lean and never sees the export. It receives result.json as a job output, never
-#   as an artifact (any job in the run, `build` included, can upload an artifact), validates it and
-#   has GitHub sign it.
+#   as an artifact (any job in the run, `build` included, can upload an artifact), validates it,
+#   checks that it is for this repository and commit, and has GitHub sign it.
 #
 # No text from the repository or the export reaches the log unescaped: the runner reads workflow
 # commands in the log, and `check` and `sign` must not take any from the developer. vacheck's own
@@ -42,14 +44,12 @@ defaults:
 
 env:
   MANIFEST: ${{ inputs.manifest }}
-  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.0.0/vacheck.pyz
-  VACHECK_SHA256: 759243a6ccfa2842e13aa91874503390f8ec146f2b9854efaa1ce0f7cceda971
+  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.0/vacheck.pyz
+  VACHECK_SHA256: 2d5afc846aade0a8653ca36adbeb6d06681b967e66d3218181eba37a3314ec22
   MAX_EXPORT: "2147483648" # 2 GiB
   # The base64 of vacheck's largest result (96,000 bytes). Job sign reads it from an environment
   # variable, and Linux caps one at 128 KiB: 131,064 characters pass and 131,072 fail.
   MAX_RESULT_B64: "128000"
-  # What `lake check --paranoid` runs: Lean's kernel, then the checkers the toolchain bundles.
-  KERNELS: lean,leanchecker-paranoid,lean4lean,nanoda,con-leche,con-ron
 
 jobs:
   build:
@@ -75,25 +75,29 @@ jobs:
           echo "$VACHECK_SHA256  $va/vacheck.pyz" | sha256sum -c -
 
           # say.py copies its input to the log, each line through vacheck's log_line, so that
-          # nothing in it can be read as a workflow command. Lines are cut at 4096 bytes, the log
-          # at 400 lines.
+          # nothing in it can be read as a workflow command. Lines are cut at 4096 bytes; of a long
+          # log, the first 100 lines and the last 300 are shown, where a build says why it failed.
           cat > "$va/say.py" <<'EOF'
-          import sys
+          import collections, sys
           sys.path.insert(0, sys.argv[1])
           from vacheck.text import log_line
-          shown = hidden = 0
+          HEAD, TAIL = 100, 300
+          shown, dropped, tail = 0, 0, collections.deque(maxlen=TAIL)
           while True:
               raw = sys.stdin.buffer.readline(4096)
               if not raw:
                   break
-              if shown < 400:
-                  sys.stdout.write(log_line(raw.decode('utf-8', 'replace').rstrip('\n')) + '\n')
-                  sys.stdout.flush()
+              line = log_line(raw.decode('utf-8', 'replace').rstrip('\n'))
+              if shown < HEAD:
+                  print(line, flush=True)
                   shown += 1
               else:
-                  hidden += 1
-          if hidden:
-              print('(%d more lines not shown)' % hidden)
+                  dropped += len(tail) == TAIL
+                  tail.append(line)
+          if dropped:
+              print('(%d lines not shown)' % dropped)
+          for line in tail:
+              print(line)
           EOF
 
           # manifest_path.py checks the manifest input, in the checkout: a relative path without
@@ -125,26 +129,58 @@ jobs:
           sys.stdout.buffer.write(b''.join(c.theorem.encode('utf-8') + b'\0' for c in manifest.claims))
           EOF
 
-          # names.py writes the name of every declaration in an export, one per line, as the JSON
-          # array of its components (a string for Name.str, a number for Name.num), read with
-          # vacheck's own reader.
-          cat > "$va/names.py" <<'EOF'
-          import json, sys
-          sys.path.insert(0, sys.argv[1])
-          from vacheck.export import ExportError, load_export
-          from vacheck.text import log_line
-          try:
-              env = load_export(sys.argv[2])
-          except (OSError, ExportError) as e:
-              sys.exit(log_line('The export cannot be read: %s' % e))
-          with open(sys.argv[3], 'w', encoding='utf-8') as out:
-              for c in env._decls:
-                  comps = []
-                  while c != 0:
-                      c, comp = env._parts[c]
-                      comps.append(comp)
-                  out.write(json.dumps(comps[::-1], ensure_ascii=False) + '\n')
+          # kernels.py reads which kernels `lake check --paranoid` ran from its output, and writes
+          # them as result.json names them. Only a kernel that lake both started and saw accept
+          # counts, and one this workflow does not know fails the check: the result never names a
+          # kernel that did not run.
+          cat > "$va/kernels.py" <<'EOF'
+          import sys
+          KNOWN = {'Lean default': 'lean', 'Lean paranoid': 'leanchecker-paranoid', 'lean4lean': 'lean4lean',
+                   'nanoda': 'nanoda', 'con-leche': 'con-leche', 'con-ron': 'con-ron'}
+          with open(sys.argv[1], encoding='utf-8', errors='replace') as f:
+              lines = f.read().split('\n')
+          start, accept = ('Running ', ' kernel on solution'), ' kernel accepts the solution'
+          ran = [l[len(start[0]):-len(start[1])] for l in lines if l.startswith(start[0]) and l.endswith(start[1])]
+          accepted = {l[:-len(accept)] for l in lines if l.endswith(accept)}
+          if 'Lean default' not in ran or any(k not in KNOWN or k not in accepted for k in ran):
+              print('::error::lake check did not report the kernels this workflow knows, each accepting.')
+              sys.exit(1)
+          print(','.join(dict.fromkeys(KNOWN[k] for k in ran)))
           EOF
+
+          # same_run.py checks that a validated result.json is for this repository and commit.
+          cat > "$va/same_run.py" <<'EOF'
+          import json, os, sys
+          with open(sys.argv[1], encoding='utf-8') as f:
+              result = json.load(f)
+          if (result['repo'].lower() != ('github.com/' + os.environ['GITHUB_REPOSITORY']).lower()
+                  or result['commit'] != os.environ['GITHUB_SHA']):
+              print('::error::The result is not for this repository and commit.')
+              sys.exit(1)
+          EOF
+
+          # sandbox runs a native tool on hostile data as `lake check` runs its kernels: / read-only;
+          # /home, /root, /run/user and /tmp empty, so none of the runner's files (the workspace,
+          # GITHUB_ENV, GITHUB_OUTPUT) are there; no network; an empty environment; and only the
+          # paths it is given bound back.
+          #   sandbox [--ro PATH]... [--rw FILE]... [--setenv NAME VALUE]... -- COMMAND ARG...
+          cat > "$va/sandbox" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          args=(--ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /run/user --tmpfs /tmp --dir /tmp/home
+                --dev /dev --proc /proc --clearenv --setenv HOME /tmp/home --setenv PATH /usr/bin:/bin)
+          while [[ $# -gt 0 && $1 != -- ]]; do
+            case $1 in
+              --ro) args+=(--ro-bind "$2" "$2"); shift 2;;
+              --rw) args+=(--bind "$2" "$2"); shift 2;;
+              --setenv) args+=(--setenv "$2" "$3"); shift 3;;
+              *) echo "sandbox: unknown option" >&2; exit 2;;
+            esac
+          done
+          shift
+          exec bwrap "${args[@]}" --unshare-all --die-with-parent --new-session -- "$@"
+          EOF
+          chmod +x "$va/sandbox"
 
       - &read-manifest
         name: Read the manifest
@@ -238,8 +274,8 @@ jobs:
 
       - name: Install bubblewrap
         run: |
-          # `lake check` runs the kernels in a bwrap sandbox without network, which needs
-          # unprivileged user namespaces.
+          # `lake check` runs the kernels in a bwrap sandbox without network, and so does the
+          # sandbox script for nanoda and the reference; both need unprivileged user namespaces.
           sudo apt-get update -q -o Acquire::Retries=3
           sudo apt-get install -y -q -o Acquire::Retries=3 bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -275,22 +311,29 @@ jobs:
             > "$work/lakefile.toml"
           cd "$work"
           "$lake" update 2>&1 | python3 -I "$va/say.py" "$va/vacheck.pyz"
-          if ! "$lake" check --from-export "$export_file" --paranoid 2>&1 | python3 -I "$va/say.py" "$va/vacheck.pyz"; then
+          if ! "$lake" check --from-export "$export_file" --paranoid 2>&1 | tee "$va/check.log" \
+              | python3 -I "$va/say.py" "$va/vacheck.pyz"; then
             echo "::error::The kernels rejected the export, or it uses an axiom other than propext, Quot.sound and Classical.choice."
             exit 1
           fi
+          python3 -I "$va/kernels.py" "$va/check.log" > "$va/kernels"
+          echo "Kernels that accepted the export: $(cat "$va/kernels")"
 
-      - name: Export the reference from the toolchain's library
+      - name: Export the references from the toolchain's libraries
         run: |
-          # Every declaration in the export whose name the toolchain's library (Init, Std, Lean,
-          # Lake) has, exported from that library with the toolchain's own leanexport code, and what
-          # each depends on. vacheck analyze compares them, so a project cannot redefine Eq or Nat.
-          # The names go through a file, as data: the leanexport command line can neither take
-          # this many nor write names such as _private.Init.Prelude.0.x.
+          # Every declaration in the export whose name a library of the toolchain declares, exported
+          # from that library with the toolchain's own leanexport code, with what each depends on.
+          # vacheck analyze compares them, so a project cannot redefine Eq, Nat or any other name of
+          # the toolchain's. Init, Std, Lean and Lake are loaded together; every other library (each
+          # of LeanChecker, LeanExport, LeanIR, Leanc and LakeMain defines `main`) is loaded alone,
+          # for the names the four do not have. A library that cannot be loaded fails the check.
+          # The names go through files, as data: the leanexport command line can neither take this
+          # many nor write names such as _private.Init.Prelude.0.x.
           va="$RUNNER_TEMP/va"
           lean="$RUNNER_TEMP/lean"
           work=$(cat "$va/work")
-          python3 -I "$va/names.py" "$va/vacheck.pyz" "$RUNNER_TEMP/export/export.ndjson" "$work/names.jsonl"
+          export_file="$RUNNER_TEMP/export/export.ndjson"
+          python3 -I "$va/vacheck.pyz" names "$export_file" > "$work/names.jsonl"
           cat > "$work/Reference.lean" <<'EOF'
           import Lean.Data.Json.Parser
           import LeanExport.Basic
@@ -309,46 +352,88 @@ jobs:
                 else throw "a name component that is not a natural number"
               | _ => throw "a name component that is neither a string nor a number"
 
+          /-- reference NAMES REST MODULE...: imports the modules, exports to stdout every declaration
+          named in NAMES that they have, and writes the lines of NAMES that they lack to REST. -/
           def main (args : List String) : IO UInt32 := do
-            let [namesFile] := args | throw <| IO.userError "usage: reference <names file>"
+            let namesIn :: namesOut :: modules := args
+              | throw <| IO.userError "usage: reference <names> <rest> <module>..."
+            if modules.isEmpty then throw <| IO.userError "usage: reference <names> <rest> <module>..."
             initSearchPath (← findSysroot)
-            let env ← importModules (#[`Init, `Std, `Lean, `Lake].map ({ module := · })) {}
-            let mut names := #[]
-            for line in ← IO.FS.lines namesFile do
+            let env ← importModules (modules.toArray.map fun m => { module := m.toName }) {}
+            let mut found := #[]
+            let mut rest := ""
+            for line in ← IO.FS.lines namesIn do
               match Json.parse line >>= nameOf with
-              | .ok n => if env.contains n then names := names.push n
+              | .ok n => if env.contains n then found := found.push n else rest := rest ++ line ++ "\n"
               | .error e => throw <| IO.userError s!"the names file: {e}"
-            LeanExport.dumpEnv env names.toList ["--export-unsafe"]
+            IO.FS.writeFile namesOut rest
+            LeanExport.dumpEnv env found.toList ["--export-unsafe"]
             return 0
           EOF
           cd "$work"
           "$lean/bin/lean" -c reference.c Reference.lean
           "$lean/bin/leanc" -o reference reference.c -lLeanExport
-          if ! env -u LEAN_PATH LEAN_SYSROOT="$lean" LEAN_ABORT_ON_PANIC=1 ./reference names.jsonl \
-              > reference.ndjson 2> reference.log; then
-            python3 -I "$va/say.py" "$va/vacheck.pyz" < reference.log
-            echo "::error::The toolchain's reference could not be exported."
+          mkdir refs
+          # reference NAMES REST OUT MODULE...: the reference program, in the sandbox. The paths are
+          # absolute, because the sandbox has only them, not the folder they are in.
+          reference() {
+            local names=$1 rest=$2 out=$3
+            shift 3
+            : > "$rest"
+            if ! "$va/sandbox" --ro "$lean" --ro "$work/reference" --ro "$names" --rw "$rest" \
+                --setenv LEAN_SYSROOT "$lean" --setenv LEAN_ABORT_ON_PANIC 1 \
+                -- "$work/reference" "$names" "$rest" "$@" > "$out" 2> reference.log; then
+              python3 -I "$va/say.py" "$va/vacheck.pyz" < reference.log
+              echo "::error::The toolchain's reference could not be exported from $*."
+              exit 1
+            fi
+            echo "$out" >> "$va/references"
+          }
+          reference "$work/names.jsonl" "$work/rest.jsonl" "$work/refs/main.ndjson" Init Std Lean Lake
+          # Every executable's library defines its own `main`, so a project's `main` is left to be
+          # shown as the project's own, with its definition, rather than compared with one of them.
+          grep -vxF '["main"]' rest.jsonl > lookup.jsonl || true
+          libraries=0
+          for olean in "$lean"/lib/lean/*.olean; do
+            library=$(basename "$olean" .olean)
+            case $library in Init|Std|Lean|Lake) continue;; esac
+            reference "$work/lookup.jsonl" "$work/unused.jsonl" "$work/refs/$library.ndjson" "$library"
+            libraries=$((libraries + 1))
+          done
+          if (( libraries == 0 )); then
+            echo "::error::The toolchain has no library besides Init, Std, Lean and Lake."
             exit 1
           fi
-          echo "The export has $(wc -l < names.jsonl) declarations; the reference is $(stat -c %s reference.ndjson) bytes."
+          echo "The export has $(wc -l < names.jsonl) declarations; $(wc -l < rest.jsonl) are not in Init, Std, Lean or Lake."
+          for f in refs/*.ndjson; do echo "Reference $(basename "$f" .ndjson): $(stat -c %s "$f") bytes."; done
 
       - name: Analyze
         run: |
           va="$RUNNER_TEMP/va"
-          work=$(cat "$va/work")
+          lean="$RUNNER_TEMP/lean"
+          export_file="$RUNNER_TEMP/export/export.ndjson"
           read -r url _ < "$va/toolchain"
           version=${url%/*}
           version=${version##*/}
+          # vacheck runs nanoda_bin to print the statements from the export: in the sandbox, with
+          # the export and the configuration vacheck writes for it.
+          cat > "$va/nanoda" <<EOF
+          #!/bin/bash
+          exec "$va/sandbox" --ro "\$1" --ro "$export_file" --ro "$lean/bin/nanoda_bin" -- "$lean/bin/nanoda_bin" "\$1"
+          EOF
+          chmod +x "$va/nanoda"
+          references=()
+          while read -r f; do references+=(--reference "$f"); done < "$va/references"
           if ! python3 -I "$va/vacheck.pyz" analyze \
-            --export "$RUNNER_TEMP/export/export.ndjson" \
-            --reference "$work/reference.ndjson" \
+            --export "$export_file" \
+            "${references[@]}" \
             --manifest "$GITHUB_WORKSPACE/$MANIFEST" \
             --source "$GITHUB_WORKSPACE" \
             --repo "github.com/$GITHUB_REPOSITORY" \
             --commit "$GITHUB_SHA" \
             --toolchain "$version" \
-            --kernels "$KERNELS" \
-            --nanoda "$RUNNER_TEMP/lean/bin/nanoda_bin" \
+            --kernels "$(cat "$va/kernels")" \
+            --nanoda "$va/nanoda" \
             > "$va/result.json"; then
             echo "::error::The check failed: the line above says why."
             exit 1
@@ -379,24 +464,21 @@ jobs:
       - *get-checker
 
       - name: Validate the result
+        env:
+          RESULT: ${{ needs.check.outputs.result }}
         run: |
           va="$RUNNER_TEMP/va"
-          # The output is too large for an environment variable (128 KiB at most on Linux), so it
-          # is written here as a quoted heredoc. It is base64, which holds no `_`, so it cannot end
-          # the heredoc, and job `check` runs nothing of the developer's.
-          cat > "$va/result.b64" <<'VA_RESULT_END'
-          ${{ needs.check.outputs.result }}
-          VA_RESULT_END
-          if ! [[ "$(tr -d '\n' < "$va/result.b64")" =~ ^[A-Za-z0-9+/]+=*$ ]]; then
-            echo "::error::The result from job check is not base64."
+          if (( ${#RESULT} > MAX_RESULT_B64 )) || ! [[ "$RESULT" =~ ^[A-Za-z0-9+/]+=*$ ]]; then
+            echo "::error::The result from job check is not the base64 of at most 96,000 bytes."
             exit 1
           fi
-          base64 -d "$va/result.b64" > "$va/received.json"
+          printf '%s' "$RESULT" | base64 -d > "$va/received.json"
           python3 -I "$va/vacheck.pyz" validate "$va/received.json" > result.json
           if ! cmp -s "$va/received.json" result.json; then
             echo "::error::The result from job check is not canonical JSON."
             exit 1
           fi
+          python3 -I "$va/same_run.py" result.json
           echo "result.json: sha256 $(sha256sum < result.json | cut -d ' ' -f 1)"
 
       - name: Sign the result
