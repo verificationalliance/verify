@@ -2,6 +2,7 @@
 import json
 import re
 from dataclasses import dataclass
+from typing import Literal, Tuple
 
 MAX_BYTES = 32 * 1024
 MAX_CLAIMS = 20
@@ -23,15 +24,15 @@ class ManifestError(Exception):
 class Claim:
     says: str
     theorem: str
-    about: str  # 'code' or 'model'
+    about: Literal['code', 'model']
 
 
 @dataclass(frozen=True)
 class Manifest:
     project: str
-    modules: tuple
-    ships: tuple
-    claims: tuple
+    modules: Tuple[str, ...]
+    ships: Tuple[str, ...]
+    claims: Tuple[Claim, ...]
 
 
 def _text(value, what):
@@ -93,7 +94,7 @@ def parse_manifest(raw):
         raise ManifestError('manifest is not UTF-8')
     try:
         obj = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ManifestError('manifest is not valid JSON')
     _fields(obj, {'version', 'project', 'modules', 'ships', 'claims'}, 'manifest')
     version = obj.get('version')

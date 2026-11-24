@@ -152,6 +152,17 @@ except ResultError:
     good = True
 check('result non-object rejected', good)
 
+check('deeply nested manifest raises ManifestError', man_rejected(b'[' * 20000))
+check('lone surrogate in result raises ResultError',
+      result_rejected(lambda r: r['claims'][0].update(statement='\ud800')))
+import typing  # noqa: E402
+from vacheck.manifest import Claim, Manifest  # noqa: E402
+_mh = typing.get_type_hints(Manifest)
+_ch = typing.get_type_hints(Claim)
+check('Manifest and Claim field types match the interface',
+      _mh['modules'] == typing.Tuple[str, ...] and _mh['ships'] == typing.Tuple[str, ...]
+      and _mh['claims'] == typing.Tuple[Claim, ...] and _ch['about'] == typing.Literal['code', 'model'])
+
 if failures:
     print('FAILED: ' + ', '.join(failures))
     sys.exit(1)

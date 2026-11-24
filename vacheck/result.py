@@ -101,5 +101,9 @@ def validate_result(obj):
         _str(r['text'], 'replaced text', 160)
     for k in _list(obj['kernels'], 'kernels', 0, 10):
         _str(k, 'kernel')
-    if len(json.dumps(obj, ensure_ascii=False).encode('utf-8')) > MAX_BYTES:
+    try:
+        size = len(json.dumps(obj, ensure_ascii=False).encode('utf-8'))
+    except (UnicodeEncodeError, RecursionError, ValueError):
+        _fail('result is not serialisable')
+    if size > MAX_BYTES:
         _fail('result is larger than 1 MB')
