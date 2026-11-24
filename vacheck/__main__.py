@@ -3,8 +3,10 @@
     toolchain <lean-toolchain>       prints `<url> <sha256>` of the toolchain's release tarball
     deps <lake-manifest.json>        accepts a project without dependencies
     modules <manifest>               prints the project folder, then the modules, one per line
-    analyze --export F --reference F --manifest F --source D --repo R --commit C --toolchain V
-            --kernels K,K --nanoda PATH
+    names <export>                   prints every declaration's name, one per line, as the JSON array
+                                     of its components: a string for Name.str, a number for Name.num
+    analyze --export F --reference F [--reference F ...] --manifest F --source D --repo R --commit C
+            --toolchain V --kernels K,K --nanoda PATH
                                      prints result.json
     validate <result.json>           prints the result's canonical JSON
 
@@ -27,11 +29,12 @@ from . import toolchain as _toolchain
 from .analyze import AnalysisError, analyze
 from .export import ExportError, load_export
 from .manifest import MAX_BYTES as MANIFEST_BYTES, ManifestError, parse_manifest
-from .result import ALLOWED_AXIOMS, MAX_BYTES as RESULT_BYTES, ResultError, validate_result
+from .result import ALLOWED_AXIOMS, ResultError, validate_result
 from .text import log_line
 
 LEAN = 'leanprover/lean4:'
 MAX_TOOLCHAIN = 1024
+MAX_READ = 1024 * 1024  # the largest result.json file validate reads; validate_result caps the JSON
 NANODA_TIMEOUT = 900  # seconds
 
 
@@ -117,6 +120,12 @@ def deps(args):
 def modules(args):
     m = _manifest(args.file)
     _out(''.join(line + '\n' for line in (m.project,) + m.modules))
+
+
+def names(args):
+    env = _export(args.file, 'the export')
+    lines = sorted(json.dumps(list(c), ensure_ascii=False, separators=(',', ':')) for c in env.components())
+    _out(''.join(line + '\n' for line in lines))
 
 
 def _nanoda_name(name):
@@ -233,12 +242,12 @@ def analyze_command(args):
         raise Rejected(_unsupported())
     manifest = _manifest(args.manifest)
     export = _export(args.export, 'the export')
-    reference = _export(args.reference, "the toolchain's reference export")
+    references = [_export(r, "the toolchain's reference export") for r in args.reference]
     source = os.path.abspath(args.source)
     manifest_path = os.path.relpath(os.path.abspath(args.manifest), source).replace(os.sep, '/')
     kernels = [k for k in args.kernels.split(',') if k]
     printer = nanoda_printer(args.nanoda, os.path.abspath(args.export))
-    result = analyze(export, reference, manifest, source, args.repo, args.commit, args.toolchain,
+    result = analyze(export, references, manifest, source, args.repo, args.commit, args.toolchain,
                      kernels, printer, manifest_path=manifest_path)
     _out(_canonical(result))
 
@@ -257,9 +266,9 @@ def _no_constant(name):
 
 
 def validate(args):
-    data = _read(args.file, RESULT_BYTES, 'result.json')
-    if len(data) > RESULT_BYTES:
-        raise Rejected('result.json is larger than 1 MB')
+    data = _read(args.file, MAX_READ, 'result.json')
+    if len(data) > MAX_READ:
+        raise Rejected('result.json is larger than 1 MiB')
     try:
         obj = json.loads(data.decode('utf-8'), object_pairs_hook=_unique, parse_constant=_no_constant)
     except (UnicodeDecodeError, ValueError, RecursionError) as e:
@@ -282,14 +291,15 @@ def _parser():
     for name, fn, arg in ((toolchain.__name__, toolchain, 'lean-toolchain file'),
                           (deps.__name__, deps, 'lake-manifest.json'),
                           (modules.__name__, modules, 'manifest'),
+                          (names.__name__, names, 'export'),
                           (validate.__name__, validate, 'result.json')):
         p = commands.add_parser(name)
         p.add_argument('file', metavar=arg)
         p.set_defaults(run=fn)
     p = commands.add_parser('analyze')
-    for flag in ('export', 'reference', 'manifest', 'source', 'repo', 'commit', 'toolchain', 'kernels',
-                 'nanoda'):
+    for flag in ('export', 'manifest', 'source', 'repo', 'commit', 'toolchain', 'kernels', 'nanoda'):
         p.add_argument('--' + flag, required=True)
+    p.add_argument('--reference', required=True, action='append')
     p.set_defaults(run=analyze_command)
     return parser
 

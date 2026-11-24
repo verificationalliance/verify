@@ -247,6 +247,28 @@ r = cli('analyze', '--export', os.path.join(FIXTURES, 'good.ndjson'), '--referen
         '--manifest', os.path.join(moved, 'sub', 'va.json'), '--source', moved, '--repo', REPO, '--commit', COMMIT,
         '--toolchain', 'v4.36.0', '--kernels', 'lean', '--nanoda', NANODA)
 check('analyze reads the manifest that --manifest names', r.code == 0 and r.err == '')
+# --reference again for each library of the toolchain: every one that declares a name must agree.
+two = tree('good', (('x', 'Good.t1', 'model'),))
+for refs_, name in (((REFS['good'], REFS['good']), 'two references that agree accepted'),
+                    ((REFS['good'], os.path.join(FIXTURES, 'fakeeq.ndjson')), 'a second reference whose Eq differs rejects')):
+    r = cli('analyze', '--export', os.path.join(FIXTURES, 'good.ndjson'), *[a for p in refs_ for a in ('--reference', p)],
+            '--manifest', os.path.join(two, '.verificationalliance.json'), '--source', two, '--repo', REPO,
+            '--commit', COMMIT, '--toolchain', 'v4.36.0', '--kernels', 'lean', '--nanoda', NANODA)
+    check(name, r.code == 0 and r.err == '' if 'accepted' in name else r.rejected("Eq differs from the toolchain's Eq"))
+
+# names <export>: the exact components of every declaration's name, for the workflow's reference.
+r = cli('names', os.path.join(FIXTURES, 'good.ndjson'))
+name_lines = r.out.split('\n')
+parsed = attempt(lambda: [json.loads(line) for line in name_lines[:-1]]) or []
+check('names prints one JSON array per declaration, sorted, and nothing else',
+      r.code == 0 and r.err == '' and name_lines[-1] == '' and len(parsed) == 178
+      and name_lines[:-1] == sorted(name_lines[:-1])
+      and all(isinstance(p, list) and p and all(type(c) in (str, int) for c in p) for p in parsed))
+check('names writes a «» component as it is and a number as a number',
+      ['Good', 'key never leaves'] in parsed and ['_private', 'Init', 'Classical', 0, 'Classical', 'em', 'match_1_1'] in parsed
+      and '["Good","key never leaves"]' in name_lines)
+check('names of a file that is not an export rejected',
+      cli('names', write(fresh('x.ndjson'), '{"meta":1}\n::error::x\n')).rejected('the export cannot be read'))
 # The build digest covers the manifest file that --manifest names.
 spaced = result_of(analyze('good', root=tree('good', (), raw=manifest(claims=good_claims) + ' ')))
 check('the build digest covers the manifest file',

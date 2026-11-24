@@ -3,8 +3,14 @@
 Everything here is hostile data: the export comes from a job that ran the developer's code, and the
 checkout is the developer's repository. Nothing in it is run; its files are only hashed or read as
 text, never through a symlink. The build digest covers every build input in the checkout, and a
-symlink among them is an error. Only the project's .lean files of at most 2 MiB are read as text.
-Messages name things from the export and the manifest, so each goes through text.log_line.
+symlink among them is an error. Only the project's .lean files of at most 2 MiB, outside any folder
+named .lake or .git, are read as text. Messages name things from the export and the manifest, so
+each goes through text.log_line.
+
+What the result publishes must be shown as it is: a name, a statement or a sentence that holds a
+character a report cannot show (a control or format character, a line or paragraph separator, a
+surrogate; a line break is allowed in a statement and a definition's text) is rejected, so the
+checker and the server agree on every result.
 """
 import errno
 import hashlib
@@ -16,7 +22,7 @@ import stat
 from . import VERSION
 from .export import ExportError, axioms_of, constants_in_type, digest
 from .manifest import _STRIP
-from .result import ALLOWED_AXIOMS, SCHEMA, ResultError, validate_result
+from .result import ALLOWED_AXIOMS, SCHEMA, ResultError, describe, hidden_character, validate_result
 from .text import log_line
 
 MAX_FILE = 2 * 1024 * 1024  # the largest .lean file read as text
@@ -26,6 +32,9 @@ MAX_DEFS = 20
 MAX_LINE_TEXT = 160
 MAX_REPLACED = 200  # the result contract's limit
 LAKE_FILES = ('lakefile.lean', 'lakefile.toml', 'lake-manifest.json', 'lean-toolchain')
+# Folders whose files are hashed for the build digest but never read as text: Lake's build and
+# package folders, and git's.
+UNREAD = ('.lake', '.git')
 _SYMLINK = 'symlinks are not supported in v1: '
 REPLACERS = ('implemented_by', 'extern', 'csimp')
 _ALLOWED_TEXT = 'propext, Quot.sound and Classical.choice'
@@ -51,10 +60,19 @@ class AnalysisError(Exception):
 def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, kernels, printer, manifest_path):
     """result.json for the manifest's claims, or AnalysisError with a message for the developer's log.
 
-    `reference` is the toolchain's own export of (at least) the library names that `export` uses.
+    `reference` is the toolchain's own export of (at least) the library names that `export` uses, or
+    a list of such exports, one per library of the toolchain: a name is the library's when any of
+    them declares it, and must then be identical to every one that does.
     `source_dir` is the checkout, and `manifest_path` the manifest file's path inside it.
     """
+    references = list(reference) if isinstance(reference, (list, tuple)) else [reference]
     theorems = [c.theorem for c in manifest.claims]
+    _shown(manifest.project, 'the project folder %s' % manifest.project)
+    for s in manifest.ships:
+        _shown(s, 'the shipped target %s' % s)
+    for c in manifest.claims:
+        _shown(c.theorem, 'the theorem name %s' % c.theorem)
+        _shown(c.says, 'what the claim on %s says' % c.theorem)
     try:
         # 1. The claimed theorems exist, and are theorems.
         for t in theorems:
@@ -66,9 +84,10 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         # 2. Every name the export shares with the toolchain's library is the library's own
         # declaration. A digest names the constants a declaration uses without covering them, so
         # every shared name is compared, not only those the claimed theorems mention.
-        library = reference.names()
+        library = frozenset().union(*(r.names() for r in references))
         for name in sorted(export.names() & library):
-            if digest(export, name) != digest(reference, name):
+            mine = digest(export, name)
+            if any(name in r.names() and digest(r, name) != mine for r in references):
                 raise AnalysisError("%s differs from the toolchain's %s" % (name, name))
         # 3. No axioms but the allowed three.
         axioms = {}
@@ -110,7 +129,8 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     for rel, path in _build_inputs(source_dir, prefix) + [(manifest_rel, manifest_file)]:
         if rel in hashes:
             continue
-        in_project = rel.endswith('.lean') and (not prefix or rel.startswith(prefix + '/'))
+        in_project = (rel.endswith('.lean') and (not prefix or rel.startswith(prefix + '/'))
+                      and not any(p in UNREAD for p in rel.split('/')[:-1]))
         hashes[rel], size, data = _hash(path, rel, MAX_TOTAL - total, in_project)
         total += size
         if data is None:
@@ -130,18 +150,22 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
             if any(w in plain for w in REPLACERS):
                 if len(replaced) == MAX_REPLACED:
                     raise AnalysisError('more than %d lines use implemented_by, extern or csimp' % MAX_REPLACED)
-                replaced.append({'path': rel, 'line': i, 'text': plain.strip()[:MAX_LINE_TEXT]})
+                replaced.append({'path': rel, 'line': i, 'text': _visible(raw).strip()[:MAX_LINE_TEXT]})
     # The digest of the JSON array of [path, sha256 of the file] pairs, sorted.
     build_digest = _sha256(json.dumps(sorted(hashes.items()), separators=(',', ':')).encode())
 
     claims = []
     for c in manifest.claims:
+        _shown(printed[c.theorem], 'the statement of %s' % c.theorem, newlines=True)
+        for d in defs[c.theorem]:
+            _shown(d, 'the definition name %s' % d)
+            _shown(printed[d], 'the text of %s' % d, newlines=True)
         claims.append({
             'says': c.says,
             'theorem': c.theorem,
             'about': c.about,
-            'statement': _plain(printed[c.theorem]),
-            'defs': [{'name': _plain(d), 'text': _plain(printed[d])} for d in defs[c.theorem]],
+            'statement': printed[c.theorem],
+            'defs': [{'name': d, 'text': printed[d]} for d in defs[c.theorem]],
             'axioms': axioms[c.theorem],
             'source': sources.get(_last_component(c.theorem)),
         })
@@ -164,9 +188,18 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     return result
 
 
-def _plain(text):
-    """Text without control or bidi characters, line breaks kept."""
-    return '\n'.join(_STRIP.sub('', line) for line in text.split('\n'))
+def _shown(text, what, newlines=False):
+    """AnalysisError if text holds a character that a report cannot show."""
+    c = hidden_character(text, newlines)
+    if c is not None:
+        raise AnalysisError('%s holds the character %s, which a report cannot show' % (what, describe(c)))
+
+
+def _visible(line):
+    """A source line as the report can show it: tabs as spaces, other hidden characters removed."""
+    if hidden_character(line) is None:
+        return line
+    return ''.join(' ' if c == '\t' else c for c in line if c == '\t' or hidden_character(c) is None)
 
 
 def _last_component(name):
@@ -290,4 +323,4 @@ def _plain_path(rel):
         rel.encode('utf-8')
     except UnicodeEncodeError:
         return False
-    return '\\' not in rel and not _STRIP.search(rel)
+    return '\\' not in rel and hidden_character(rel) is None

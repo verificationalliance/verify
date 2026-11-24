@@ -155,6 +155,86 @@ check('result non-object rejected', good)
 check('deeply nested manifest raises ManifestError', man_rejected(b'[' * 20000))
 check('lone surrogate in result raises ResultError',
       result_rejected(lambda r: r['claims'][0].update(statement='\ud800')))
+
+# What a report cannot show is rejected in every text field the result publishes, so the checker
+# and the server agree: control and format characters (zero-width, bidi, soft hyphen, BOM, tab),
+# line and paragraph separators and surrogates. A line break only in a statement or a def's text.
+HIDDEN = ('​', '‮', '\x07', '\t', '\r', ' ', ' ', '﻿', '­', '\ud800', '\x85')
+TEXT_FIELDS = {
+    'says': lambda r, v: r['claims'][0].update(says='a' + v),
+    'theorem': lambda r, v: r['claims'][0].update(theorem='a' + v),
+    'statement': lambda r, v: r['claims'][0].update(statement='a' + v),
+    'def name': lambda r, v: r['claims'][0]['defs'][0].update(name='a' + v),
+    'def text': lambda r, v: r['claims'][0]['defs'][0].update(text='a' + v),
+    'source path': lambda r, v: r['claims'][0]['source'].update(path='a' + v),
+    'replaced path': lambda r, v: r['evidence']['replaced'][0].update(path='a' + v),
+    'replaced text': lambda r, v: r['evidence']['replaced'][0].update(text='a' + v),
+    'ship': lambda r, v: r['evidence'].update(ships=['a' + v]),
+    'kernel': lambda r, v: r.update(kernels=['a' + v]),
+    'project': lambda r, v: r.update(project='a' + v),
+    'toolchain': lambda r, v: r.update(toolchain='a' + v),
+    'checker': lambda r, v: r.update(checker='a' + v),
+}
+check('a hidden character in any published text field rejected',
+      [(f, ascii(v)) for f, mut in TEXT_FIELDS.items() for v in HIDDEN
+       if not result_rejected(lambda r, mut=mut, v=v: mut(r, v))] == [])
+check('a line break rejected outside statements and def texts',
+      [f for f, mut in TEXT_FIELDS.items()
+       if f not in ('statement', 'def text') and not result_rejected(lambda r, mut=mut: mut(r, '\nb'))] == [])
+check('a line break accepted in a statement and a def text',
+      not result_rejected(lambda r: TEXT_FIELDS['statement'](r, '\nb'))
+      and not result_rejected(lambda r: TEXT_FIELDS['def text'](r, '\nb')))
+
+
+def result_message(mut):
+    r = copy.deepcopy(res)
+    mut(r)
+    try:
+        validate_result(r)
+    except ResultError as e:
+        return str(e)
+    return None
+
+
+check('a hidden character is named by its code point, never written',
+      result_message(lambda r: TEXT_FIELDS['says'](r, '​'))
+      == 'says holds the character U+200B, which a report cannot show')
+
+
+def canonical_size(r):
+    return len(json.dumps(r, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8'))
+
+
+def of_size(n):
+    """res grown with def texts until its canonical JSON is exactly n bytes."""
+    r = copy.deepcopy(res)
+    while canonical_size(r) < n:
+        if len(r['claims'][-1]['defs']) == 20:
+            r['claims'].append(dict(copy.deepcopy(res['claims'][0]), defs=[]))
+            continue
+        r['claims'][-1]['defs'].append({'name': 'n', 'text': ''})
+        d = r['claims'][-1]['defs'][-1]
+        d['text'] = 'a' * max(0, min(4000, n - canonical_size(r)))
+    return r
+
+
+import re  # noqa: E402
+from vacheck import result as vr  # noqa: E402
+at_cap, over_cap = of_size(vr.MAX_BYTES), of_size(vr.MAX_BYTES + 1)
+check('result of exactly MAX_BYTES canonical bytes accepted, one more rejected',
+      canonical_size(at_cap) == vr.MAX_BYTES and canonical_size(over_cap) == vr.MAX_BYTES + 1
+      and not result_rejected(lambda r: r.update(at_cap)) and result_rejected(lambda r: r.update(over_cap)))
+check('the size message says why the result is too large',
+      'the most the workflow can pass to job sign' in (result_message(lambda r: r.update(over_cap)) or ''))
+# Job sign reads the result, base64, from an environment variable: Linux caps one (NAME=value) at
+# 131,072 bytes with its NUL, and lean.yml checks the base64 against MAX_RESULT_B64.
+B64_CAP = 4 * -(-vr.MAX_BYTES // 3)
+with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       '.github', 'workflows', 'lean.yml'), encoding='utf-8') as f:
+    lean_yml = f.read()
+check("result's cap is lean.yml's, and fits in an environment variable",
+      vr.MAX_BYTES == 96000 and B64_CAP == 128000 and len('RESULT=') + B64_CAP + 1 <= 131072
+      and re.search(r'^  MAX_RESULT_B64: "%d"' % B64_CAP, lean_yml, re.MULTILINE) is not None)
 import typing  # noqa: E402
 from vacheck.manifest import Claim, Manifest  # noqa: E402
 _mh = typing.get_type_hints(Manifest)
@@ -885,6 +965,76 @@ dangling = attempt(lambda: vx.load_export(export_file(
      '{"thm":{"name":2,"levelParams":[],"type":1,"value":1,"all":[2]}}'])))
 check('an export error raises AnalysisError',
       analysis_error(lambda: run('good', ['t'], export=dangling, ref=dangling)) is not None)
+
+# vacheck 1.1.0. What a report cannot show is rejected with a message naming where it is, so a
+# result analyze writes is one the server accepts.
+def hidden_in(**kw):
+    claims = kw.pop('claims', [('x', 'Good.t1', 'model')])
+    return analysis_error(lambda: run('good', tree=source_tree('good', claims, **kw), **kw.pop('run', {})))
+
+
+def with_pp(extra):
+    """A printer that adds `extra` to every text it prints."""
+    return lambda names: {n: '<pp %s>%s' % (n, extra) for n in names}
+
+
+check('a zero-width character in what a claim says rejected, by its code point',
+      'what the claim on Good.t1 says holds the character U+200B' in (hidden_in(claims=[('a​b', 'Good.t1', 'model')]) or ''))
+check('a line separator in a theorem name rejected',
+      'the theorem name Good.' in (analysis_error(lambda: run('good', ['Good.«a b»'])) or '')
+      and 'U+2028' in (analysis_error(lambda: run('good', ['Good.«a b»'])) or ''))
+check('a zero-width character in a statement rejected',
+      'the statement of Good.t1 holds the character U+200B'
+      in (analysis_error(lambda: run('good', ['Good.t1'], pp=with_pp('​'))) or ''))
+check('a tab in a definition text rejected',
+      'the text of Good.f holds the character U+0009'
+      in (analysis_error(lambda: run('good', ['Good.t1'], pp=lambda names: {
+          n: '<pp %s>' % n + ('\t' if n == 'Good.f' else '') for n in names})) or ''))
+check('line breaks kept in statements and definition texts',
+      [(c['statement'], c['defs'][0]['text']) for c in (attempt(lambda: run('good', ['Good.t1'], pp=with_pp('\n  x')))
+                                                       or {}).get('claims', [])]
+      == [('<pp Good.t1>\n  x', '<pp Good.f>\n  x')])
+check('a zero-width character in the project folder rejected',
+      'the project folder' in (hidden_in(project='co​re') or ''))
+check('a zero-width character in a shipped target rejected',
+      'the shipped target' in (hidden_in(ships=['«G​ood»']) or ''))
+check('a zero-width character in a file name rejected',
+      'is not plain text' in (analysis_error(lambda: with_file('core/A​.lean', 'def a := 1\n')) or ''))
+check('a replaced line is shown with tabs as spaces and without hidden characters',
+      (attempt(lambda: with_file('core/M.lean', '\t@[extern "x​y"]\topaque y : Nat\n')) or {})
+      .get('evidence', {}).get('replaced') == [{'path': 'core/M.lean', 'line': 1, 'text': '@[extern "xy"] opaque y : Nat'}])
+
+# Steps 6 and 7 read no file in a folder named .lake or .git, at any depth: there are Lake's builds
+# and packages, and git's objects. Step 8 still hashes them. Both files sort before core/Good.lean.
+UNREAD_TEXT = 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
+
+
+def unread_folders():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    before = run('good', tree=(root, manifest))
+    for rel in ('core/.git/B.lean', 'core/A/.lake/C.lean'):
+        write(os.path.join(root, rel), UNREAD_TEXT)
+    after = run('good', tree=(root, manifest))
+    return (after['claims'][0]['source'], after['evidence']['replaced'],
+            before['build_digest'] != after['build_digest'])
+
+
+check('no text read in .lake or .git folders at any depth, which are still hashed',
+      attempt(unread_folders) == ({'path': 'core/Good.lean', 'line': 5}, [], True))
+check('the same files outside those folders are read',
+      (lambda r: r is not None and r['claims'][0]['source'] == {'path': 'core/A/C.lean', 'line': 1}
+       and len(r['evidence']['replaced']) == 1)(attempt(lambda: with_file('core/A/C.lean', UNREAD_TEXT))))
+
+# More than one reference: one per library of the toolchain. A name is the library's when any of
+# them declares it, and must then be identical to every one that does.
+check('two references that agree accepted',
+      valid(attempt(lambda: run('good', ['Good.t1'], ref=[refs['good'], refs['good']])) or {}))
+check('a second reference whose Eq differs rejects',
+      rejected_with('good', ['Good.t1'], "Eq differs from the toolchain's Eq", ref=[refs['good'], envs['fakeeq']]))
+check('a name only the second reference declares is compared',
+      rejected_with('good', ['Good.«key never leaves»'], 'Nat.lt',
+                    ref=attempt(lambda: [reference('good', 'Good', drop={'Nat.lt'}),
+                                         reference('good', 'Good', change=other_nat_lt)])))
 
 # Messages go to the developer's log in a job that holds a token. GitHub's runner reads `::command::`
 # at the start of a line and the legacy `##[command]` anywhere in one, and may skip invisible

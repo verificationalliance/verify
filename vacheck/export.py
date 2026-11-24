@@ -163,6 +163,18 @@ class Env:
         d = self._decls.get(self._lookup(name))
         return None if d is None else d.kind
 
+    def components(self):
+        """Every declaration's name as the tuple of its components: a str for Name.str, an int for
+        Name.num. Unlike the printed names, these are exact: they are what Lean's Name is."""
+        out = []
+        for c in self._decls:
+            comps = []
+            while c != 0:
+                c, comp = self._parts[c]
+                comps.append(comp)
+            out.append(tuple(reversed(comps)))
+        return out
+
     def names(self):
         if self._names is None:
             names = frozenset(self._render(c) for c in self._decls)
