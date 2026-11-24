@@ -50,8 +50,8 @@ defaults:
 
 env:
   MANIFEST: ${{ inputs.manifest }}
-  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.2/vacheck.pyz
-  VACHECK_SHA256: 899e11fdd22437af4ea39c0e582f2af153ef445ff5cc523c3f09b08b797eaf20
+  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.3/vacheck.pyz
+  VACHECK_SHA256: 8f2994ba847954a90f4b78b680319f9e12bfe07d12ee302429b3ca29439e4717
   MAX_EXPORT: "2147483648" # 2 GiB
   # The base64 of vacheck's largest result (96,000 bytes). Job sign reads it from an environment
   # variable, and Linux caps one at 128 KiB: 131,064 characters pass and 131,072 fail.
@@ -362,7 +362,7 @@ jobs:
           echo "Runner $RUNNER_NAME, image $ImageOS $ImageVersion, $os."
 
       # The checkout is data: vacheck reads the manifest, the lean-toolchain and the Lake files, and
-      # hashes the build inputs. Nothing in it is run, built or loaded.
+      # hashes every file of the checkout but .git. Nothing in it is run, built or loaded.
       - *checkout
 
       - name: Install bubblewrap

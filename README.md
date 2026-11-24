@@ -43,8 +43,16 @@ jobs:
 ```
 
 Public repositories on github.com only. Lean 4 v4.35.0 or later, with no Lake dependencies, and
-the project's `.lake` folder not committed. The jobs that check and sign run only on GitHub's
-standard `ubuntu-24.04` runners, never on a larger or self-hosted one.
+the project's `.lake` folder not committed. The jobs that check and sign stop unless the runner
+says it is a standard GitHub-hosted `ubuntu-24.04` one, which a runner image made to lie could fake.
+
+## The build digest
+
+A review that makes a claim "Code proved" holds while the build digest stays the same. The digest
+covers every file in the repository at the checked commit except `.git`, wherever the project
+folder is, and the manifest. A symlink counts by where it points: it must point inside the
+repository, and none may sit in the project folder. So any change to any file, documentation
+included, needs a new review.
 
 ## Releases
 
