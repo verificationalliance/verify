@@ -1,6 +1,6 @@
-# Runs lean.yml on two fixtures, as a developer's repository would call it: `good` must pass and be
-# signed, `sorry` must fail. The run as a whole shows as failed, because `sorry` does; job `assert`
-# is the verdict.
+# Runs lean.yml on fixtures, as a developer's repository would call it: `good` must pass and be
+# signed; `sorry`, `fakeeq`, `native` and `axiom` must fail, the last three in job `check`. The run as a whole shows as failed, because they do; the assert jobs
+# are the verdict.
 name: selftest
 
 on:
@@ -30,8 +30,35 @@ jobs:
       id-token: write
       attestations: write
 
+  fakeeq:
+    uses: ./.github/workflows/lean.yml
+    with:
+      manifest: tests/fixtures/fakeeq/.verificationalliance.json
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  native:
+    uses: ./.github/workflows/lean.yml
+    with:
+      manifest: tests/fixtures/native/.verificationalliance.json
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  axiom:
+    uses: ./.github/workflows/lean.yml
+    with:
+      manifest: tests/fixtures/axiom/.verificationalliance.json
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
   assert:
-    needs: [good, sorry]
+    needs: [good, sorry, fakeeq, native, axiom]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -68,3 +95,31 @@ jobs:
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/lean.yml" \
             --predicate-type https://verificationalliance.org/attestations/proof-check/v1 \
             --deny-self-hosted-runners
+
+  # `fakeeq`, `native` and `axiom` build fine, so they must be stopped by `check`, the job that
+  # replays the export and compares it with the toolchain's library. Failing in `build` would
+  # mean the trust check never ran. Only job names and conclusions are read, never log text.
+  assert-check:
+    needs: [good, sorry, fakeeq, native, axiom]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - name: The three failed in check, and good was signed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | [.name, .conclusion] | @tsv' > jobs.tsv
+          cut -f1,2 jobs.tsv
+          for c in fakeeq native axiom; do
+            test "$(awk -F'\t' -v n="$c / check" '$1 == n {print $2}' jobs.tsv)" = failure
+            test "$(awk -F'\t' -v n="$c / build (untrusted)" '$1 == n {print $2}' jobs.tsv)" = success
+            test "$(awk -F'\t' -v n="$c / sign" '$1 == n {print $2}' jobs.tsv)" != success
+          done
+          test "$(awk -F'\t' '$1 == "good / sign" {print $2}' jobs.tsv)" = success

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "project": "tests/fixtures/native",
+  "modules": ["Native"],
+  "claims": [
+    {"says": "A fixture claim.", "theorem": "Native.t", "about": "model"}
+  ]
+}
