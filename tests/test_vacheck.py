@@ -1163,11 +1163,15 @@ check('a theorem with universe parameters, t1.{u}, has its source',
 check('a «» name in the manifest matches the source as Lean reads it',
       attempt(lambda: source_of({}, names=('Good.«key never leaves»', 'Good.«t1»'))) == [at('core/Good.lean', 7), GOOD_SRC[0], GOOD_SRC[1]])
 def hostile_scan():
+    """The slowest of the hostile files, each of 2 MiB, takes under 5 seconds (all take under 1 s here)."""
     import time
-    start = time.monotonic()
-    for text in ('«' * (MB2 // 2), '/-' * (MB2 // 2), '"' * MB2, 'r#"' * (MB2 // 3), "'" * MB2, 'namespace A\n' * (MB2 // 12)):
+    worst = 0
+    for text in ('«' * MB2, '/-' * (MB2 // 2), '/- ' * (MB2 // 3), '"' * MB2, 'r#"' * (MB2 // 3), "'" * MB2,
+                 'namespace A\n' * (MB2 // 12)):
+        start = time.monotonic()
         va.declarations(text)
-    return time.monotonic() - start < 20
+        worst = max(worst, time.monotonic() - start)
+    return worst < 5
 
 
 check('hostile source text is scanned in linear time', attempt(hostile_scan) is True)
