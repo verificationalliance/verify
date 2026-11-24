@@ -10,7 +10,7 @@ MAX_MODULES = 20
 MAX_SHIPS = 10
 MAX_SAYS = 200
 
-_STRIP = re.compile('[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]')
+_STRIP = re.compile('[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]')
 _URL = re.compile(r'https?://', re.IGNORECASE)
 _IDENT = re.compile(r"[^\W\d][\w'!?]*")
 _GUILLEMET = re.compile('«[^»]+»')

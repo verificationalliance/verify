@@ -79,7 +79,7 @@ check('ships 11 rejected', man_rejected(man(ships=['S%d' % i for i in range(11)]
 check('ships valid accepted', parse_manifest(man(ships=['OSVACore'])).ships == ('OSVACore',))
 check('bad module name rejected', man_rejected(man(modules=['a b'])))
 check('bidi and control characters stripped',
-      parse_manifest(man(claims=[claim(says='a‮b\x07c')])).claims[0].says == 'abc')
+      parse_manifest(man(claims=[claim(says='a\u202eb\x07c')])).claims[0].says == 'abc')
 check('says empty after strip rejected', man_rejected(man(claims=[claim(says='\x07')])))
 
 res = {
@@ -585,11 +585,12 @@ def source_tree(case, claims, project='core', ships=()):
     return root, parse_manifest(raw)
 
 
-def run(case, theorems=(), tree=None, ref=None, export=None, pp=printer, repo=REPO):
+def run(case, theorems=(), tree=None, ref=None, export=None, pp=printer, repo=REPO,
+        manifest_path='.verificationalliance.json'):
     """analyze on the fixture's export and its reference, with a new source tree unless `tree` is given."""
     root, manifest = tree or source_tree(case, [('x', t, 'model') for t in theorems])
     return va.analyze(envs[case] if export is None else export, refs[case] if ref is None else ref,
-                      manifest, root, repo, COMMIT, 'v4.36.0', KERNELS, pp)
+                      manifest, root, repo, COMMIT, 'v4.36.0', KERNELS, pp, manifest_path)
 
 
 def analysis_error(fn):
@@ -622,7 +623,7 @@ def valid(r):
     return True
 
 
-good_tree = attempt(lambda: source_tree('good', [('Never ‮leaks\x07.', 'Good.«key never leaves»', 'code'),
+good_tree = attempt(lambda: source_tree('good', [('Never \u202eleaks\x07.', 'Good.«key never leaves»', 'code'),
                                                  ('f is n + 1, or not.', 'Good.t1', 'model')], ships=['Good']))
 good_res = attempt(lambda: run('good', tree=good_tree)) or {}
 gc = good_res.get('claims') or [{}, {}]
@@ -679,7 +680,7 @@ check('replaced listed', valid(rep) and rep['evidence']['replaced']
 
 def long_replaced():
     root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
-    write(os.path.join(root, 'core', 'Good.lean'), '\n   @[extern "⁦%s"] opaque g : Nat\n' % ('a' * 300), 'a')
+    write(os.path.join(root, 'core', 'Good.lean'), '\n   @[extern "\u2066%s"] opaque g : Nat\n' % ('a' * 300), 'a')
     return run('good', tree=(root, manifest))['evidence']['replaced']
 
 
@@ -729,53 +730,101 @@ def append(rel, text=' '):
 ds = attempt(lambda: digests(append('README.md'), append('core/README.md'), append('core/Good.lean', '\n-- x\n')))
 check('build digest changes with a lean file and not with README.md',
       ds is not None and is_sha256(ds[0]) and ds[0] == ds[1] == ds[2] != ds[3])
+# Every build input in the checkout: Lake compiles sources from outside the project (srcDir := "../src")
+# and from folders named .lake below the project's own.
 covered = ('core/lakefile.toml', 'core/lake-manifest.json', 'core/lean-toolchain', '.verificationalliance.json',
-           'core/lakefile.lean', 'core/Good/Sub.lean')
+           'core/lakefile.lean', 'core/Good/Sub.lean', 'core/Good/.lake/Y.lean', 'Top.lean', 'src/X.lean',
+           'other/lakefile.toml', 'other/lake-manifest.json', 'other/lean-toolchain', 'core/.git/Z.lean')
 ds = attempt(lambda: digests(*[append(rel) for rel in covered]))
-check('build digest covers the lake files, the manifest and every lean file',
+check('build digest covers every lean and lake file in the checkout, and the manifest',
       ds is not None and len(set(ds)) == len(covered) + 1)
-ds = attempt(lambda: digests(append('core/.lake/build/X.lean'), append('core/Good/.lake/Y.lean'),
-                             append('core/Good.olean'), append('Top.lean')))
-check('build digest leaves out .lake, other files and files outside the project',
+ds = attempt(lambda: digests(append('core/.lake/build/X.lean'), append('.git/X.lean'), append('core/Good.olean'),
+                             append('other/README.md')))
+check("build digest leaves out the project's .lake, the root .git and other files",
       ds is not None and len(set(ds)) == 1)
 
+BIG = 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
+
+
+def big_file(size):
+    """Adds core/A.lean of `size` bytes to a new good tree, then changes its last byte. Returns the
+    source of Good.t1 and the replaced lines with the file added, and whether all three digests differ."""
+    tree = source_tree('good', [('x', 'Good.t1', 'model')])
+    path = os.path.join(tree[0], 'core', 'A.lean')
+    before = run('good', tree=tree)['build_digest']
+    write(path, BIG + ' ' * (size - len(BIG)))
+    r = run('good', tree=tree)
+    write(path, BIG + ' ' * (size - len(BIG) - 1) + 'x')
+    after = run('good', tree=tree)['build_digest']
+    return r['claims'][0]['source'], r['evidence']['replaced'], len({before, r['build_digest'], after}) == 3
+
+
+NOT_READ = ({'path': 'core/Good.lean', 'line': 5}, [], True)
+check('a lean file of 3 MiB changes the digest and is not read as text',
+      attempt(lambda: big_file(3 * 1024 * 1024)) == NOT_READ)
+check('a lean file over 2 MiB is not read as text', attempt(lambda: big_file(MB2 + 1)) == NOT_READ)
+check('a lean file of 2 MiB is read', attempt(lambda: big_file(MB2))
+      == ({'path': 'core/A.lean', 'line': 1},
+          [{'path': 'core/A.lean', 'line': 2, 'text': '@[extern "x"] opaque y : Nat'}], True))
+
+
+def total_cap(slack):
+    """analyze with the cap on the bytes hashed set to the good tree's inputs plus `slack`."""
+    tree = source_tree('good', [('x', 'Good.t1', 'model')])
+    total = sum(os.path.getsize(os.path.join(tree[0], rel)) for rel in (
+        'core/Good.lean', 'core/lakefile.toml', 'core/lake-manifest.json', 'core/lean-toolchain',
+        '.verificationalliance.json'))
+    saved = va.MAX_TOTAL
+    va.MAX_TOTAL = total + slack
+    try:
+        if slack < 0:
+            return analysis_error(lambda: run('good', tree=tree))
+        return is_sha256(run('good', tree=tree)['build_digest'])
+    finally:
+        va.MAX_TOTAL = saved
+
+
+check('build inputs over 512 MiB in total raise', attempt(lambda: va.MAX_TOTAL) == 512 * 1024 * 1024
+      and attempt(lambda: total_cap(0)) is True and '512 MiB' in (attempt(lambda: total_cap(-1)) or ''))
+
 OUTSIDE = fresh('outside')
-write(os.path.join(OUTSIDE, 'A.lean'), 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n')
+write(os.path.join(OUTSIDE, 'A.lean'), BIG)
+SYMLINKS = 'symlinks are not supported in v1: '
 
 
-def outside_reads(prepare):
-    """(source of Good.t1, replaced, digest unchanged) after prepare(project folder)."""
+def with_symlink(rel, target):
+    """The AnalysisError message after making `rel` a symlink to `target` in a new good tree."""
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    path = os.path.join(root, rel)
+    if os.path.lexists(path):
+        os.remove(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.symlink(target, path)
+    return analysis_error(lambda: run('good', tree=(root, manifest)))
+
+
+A_LEAN = os.path.join(OUTSIDE, 'A.lean')
+check('a symlinked lean file raises', with_symlink('core/A.lean', A_LEAN) == SYMLINKS + 'core/A.lean')
+check('a symlink to a lean file in the checkout raises', with_symlink('core/B.lean', 'Good.lean')
+      == SYMLINKS + 'core/B.lean')
+check('a dangling symlinked lean file raises',
+      with_symlink('core/D.lean', A_LEAN + '.gone') == SYMLINKS + 'core/D.lean')
+check('a symlinked lean file outside the project raises', with_symlink('src/X.lean', A_LEAN) == SYMLINKS + 'src/X.lean')
+check('a symlinked folder raises', with_symlink('core/Ab', OUTSIDE) == SYMLINKS + 'core/Ab')
+check('a symlinked folder outside the project raises', with_symlink('src', OUTSIDE) == SYMLINKS + 'src')
+check('a symlinked lake file raises', with_symlink('core/lean-toolchain', A_LEAN) == SYMLINKS + 'core/lean-toolchain')
+check('a symlinked manifest file raises',
+      with_symlink('.verificationalliance.json', A_LEAN) == SYMLINKS + '.verificationalliance.json')
+
+
+def harmless_symlink():
     tree = source_tree('good', [('x', 'Good.t1', 'model')])
     before = run('good', tree=tree)['build_digest']
-    prepare(os.path.join(tree[0], 'core'))
-    r = run('good', tree=tree)
-    return r['claims'][0]['source'], r['evidence']['replaced'], r['build_digest'] == before
+    os.symlink(A_LEAN, os.path.join(tree[0], 'README.md'))
+    return run('good', tree=tree)['build_digest'] == before
 
 
-UNREAD = ({'path': 'core/Good.lean', 'line': 5}, [], True)
-check('a symlinked lean file is not read',
-      attempt(lambda: outside_reads(lambda p: os.symlink(os.path.join(OUTSIDE, 'A.lean'), os.path.join(p, 'A.lean'))))
-      == UNREAD)
-check('a symlinked folder is not followed',
-      attempt(lambda: outside_reads(lambda p: os.symlink(OUTSIDE, os.path.join(p, 'Ab')))) == UNREAD)
-
-
-def link_toolchain(project):
-    """Replaces lean-toolchain with a symlink to a copy outside: same text, so only skipping it shows."""
-    shutil.copy(os.path.join(project, 'lean-toolchain'), os.path.join(OUTSIDE, 'lean-toolchain'))
-    os.remove(os.path.join(project, 'lean-toolchain'))
-    os.symlink(os.path.join(OUTSIDE, 'lean-toolchain'), os.path.join(project, 'lean-toolchain'))
-
-
-check('a symlinked lake file is not read', attempt(lambda: outside_reads(link_toolchain)[2]) is False)
-BIG = 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
-check('a lean file over 2 MB is not read',
-      attempt(lambda: outside_reads(lambda p: write(os.path.join(p, 'A.lean'), BIG + ' ' * (MB2 + 1 - len(BIG)))))
-      == UNREAD)
-check('a lean file of 2 MB is read',
-      attempt(lambda: outside_reads(lambda p: write(os.path.join(p, 'A.lean'), BIG + ' ' * (MB2 - len(BIG)))))
-      == ({'path': 'core/A.lean', 'line': 1},
-          [{'path': 'core/A.lean', 'line': 2, 'text': '@[extern "x"] opaque y : Nat'}], False))
+check('a symlink that is no build input is ignored', attempt(harmless_symlink) is True)
 
 
 def symlinked_project():
@@ -785,7 +834,29 @@ def symlinked_project():
     return run('good', tree=(root, manifest))
 
 
-check('a symlinked project folder rejected', analysis_error(symlinked_project) is not None)
+check('a symlinked project folder raises', analysis_error(symlinked_project) == SYMLINKS + 'core')
+check('analyze takes manifest_path, with no default',
+      attempt(lambda: __import__('inspect').signature(va.analyze).parameters['manifest_path'].default)
+      is __import__('inspect').Parameter.empty)
+
+
+def manifest_elsewhere():
+    """The digest hashes the manifest file at manifest_path, and not a file at the default path."""
+    tree = source_tree('good', [('x', 'Good.t1', 'model')])
+    root = tree[0]
+    os.makedirs(os.path.join(root, 'cfg'))
+    os.rename(os.path.join(root, '.verificationalliance.json'), os.path.join(root, 'cfg', 'm.json'))
+    out = [run('good', tree=tree, manifest_path='cfg/m.json')['build_digest']]
+    append('cfg/m.json')(root)
+    out.append(run('good', tree=tree, manifest_path='cfg/m.json')['build_digest'])
+    write(os.path.join(root, '.verificationalliance.json'), '{}')
+    out.append(run('good', tree=tree, manifest_path='cfg/m.json')['build_digest'])
+    return out[0] != out[1] == out[2]
+
+
+check('build digest hashes exactly the manifest file it is given', attempt(manifest_elsewhere) is True)
+check('a manifest path outside the checkout rejected',
+      analysis_error(lambda: run('good', ['Good.t1'], manifest_path='../m.json')) is not None)
 
 
 def no_source():
@@ -814,6 +885,51 @@ dangling = attempt(lambda: vx.load_export(export_file(
      '{"thm":{"name":2,"levelParams":[],"type":1,"value":1,"all":[2]}}'])))
 check('an export error raises AnalysisError',
       analysis_error(lambda: run('good', ['t'], export=dangling, ref=dangling)) is not None)
+
+# Messages go to the developer's log in a job that holds a token. GitHub's runner reads `::command::`
+# at the start of a line and the legacy `##[command]` anywhere in one, and may skip invisible
+# characters when it looks for them.
+try:
+    from vacheck.text import log_line  # noqa: E402
+except ImportError as e:
+    print('      cannot import vacheck.text: %s' % e)
+    log_line = None
+
+
+def log_safe(msg):
+    """One line of printable ASCII, with no `::` or `##` left in it."""
+    if msg is None or not all(' ' <= c <= '~' for c in msg) or '::' in msg or '##' in msg:
+        print('      unsafe message: %s' % ascii(msg))
+        return False
+    return True
+
+
+LOG_CASES = ['x\n::error::injected', '##[set-output name=result;]{"forged":1}', '#\u200b#[error]x', '::::',
+             '###[', ':\u200b:error::', '\r\n::add-mask::x', 'a\u2028::b', '\ufeff##[stop-commands]x',
+             '#\u00ad#[', '\u202e::x', ': :', '#\U000e0001#[', 'a\\b', '\ud800']
+check('log_line gives one safe line', attempt(lambda: all(log_safe(log_line(s)) for s in LOG_CASES)) is True)
+check('log_line removes control and format characters and escapes the rest visibly',
+      attempt(lambda: [log_line(s) for s in ('a\nb\u200bc\u202ed\ufeffe\x07f\u00adg', 'Good.«key»',
+                                             'a\u2028b', 'a\\b', 'plain text: ok', '\U0001d4b3')])
+      == ['abcdefg', 'Good.\\xabkey\\xbb', 'a\\u2028b', 'a\\\\b', 'plain text: ok', '\\U0001d4b3'])
+
+
+def axiom_named(name):
+    """An export whose theorem t rests on one axiom, called `name`."""
+    return vx.load_export(export_file(
+        [META, json.dumps({'in': 1, 'str': {'pre': 0, 'str': name}}), '{"in":2,"str":{"pre":0,"str":"t"}}', SORT,
+         '{"ie":1,"const":{"name":1,"us":[]}}', '{"axiom":{"name":1,"levelParams":[],"type":0,"isUnsafe":false}}',
+         '{"thm":{"name":2,"levelParams":[],"type":1,"value":1,"all":[2]}}']))
+
+
+probe_msgs = [attempt(lambda p=p: (lambda env: analysis_error(lambda: run('good', ['t'], export=env, ref=env)))(
+    axiom_named(p))) for p in ('x\n::error::injected', '##[set-output name=result;]{"forged":1}', '#\u200b#[error]x')]
+check('an axiom name cannot inject a workflow command',
+      all(log_safe(m) for m in probe_msgs) and 'injected' in probe_msgs[0] and 'forged' in probe_msgs[1])
+check('a theorem name cannot inject a workflow command',
+      all(log_safe(analysis_error(lambda t=t: run('good', [t])))
+          for t in ('Good.«::error::x»', 'Good.«##[set-output name=result;]x»',
+                    'Good.«#\u200b#[error]x»', 'Good.«x:»', 'Good.«a\u2028b»')))
 shutil.rmtree(TMP)
 
 if failures:
