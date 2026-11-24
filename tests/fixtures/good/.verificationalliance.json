@@ -5,6 +5,8 @@
   "ships": ["Good"],
   "claims": [
     {"says": "f n is either n + 1 or not.", "theorem": "Good.t1", "about": "model"},
-    {"says": "f n is greater than n.", "theorem": "Good.«key never leaves»", "about": "code"}
+    {"says": "f n is greater than n.", "theorem": "Good.«key never leaves»", "about": "code"},
+    {"says": "No range holds a value when there are none.", "theorem": "Good.anyIn_nil", "about": "model"},
+    {"says": "Picking a present lowest value gives it back.", "theorem": "Good.pick_lowest", "about": "model"}
   ]
 }

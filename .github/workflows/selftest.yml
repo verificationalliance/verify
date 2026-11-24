@@ -1,5 +1,6 @@
 # Runs lean.yml on fixtures, as a developer's repository would call it: `good` and `println` must
-# pass and be signed; `sorry`, `fakeeq`, `native`, `axiom` and `forge` must fail, all in job `check`.
+# pass and be signed; `sorry`, `fakeeq`, `native`, `axiom` and `forge` must fail, all in job `check`;
+# `dotlake`, a project with its .lake folder committed, must fail in `build`, before building.
 # The run as a whole shows as failed, because they do; the assert jobs are the verdict. Two calls
 # sign here, so the run's osva-proof-result is either one's: both are this repository and commit.
 name: selftest
@@ -80,8 +81,18 @@ jobs:
       id-token: write
       attestations: write
 
+  # A project with its .lake folder committed: refused before anything is built.
+  dotlake:
+    uses: ./.github/workflows/lean.yml
+    with:
+      manifest: tests/fixtures/dotlake/.verificationalliance.json
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
   assert:
-    needs: [good, println, sorry, fakeeq, native, axiom, forge]
+    needs: [good, println, sorry, fakeeq, native, axiom, forge, dotlake]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -127,7 +138,7 @@ jobs:
   # Failing in `build` would mean the trust check never ran. Only job names and conclusions are
   # read, never log text.
   assert-check:
-    needs: [good, println, sorry, fakeeq, native, axiom, forge]
+    needs: [good, println, sorry, fakeeq, native, axiom, forge, dotlake]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -137,7 +148,7 @@ jobs:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
     steps:
-      - name: The five failed in check, and good and println were signed
+      - name: The five failed in check, dotlake in build, and good and println were signed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -153,3 +164,6 @@ jobs:
             test "$(awk -F'\t' -v n="$c / check" '$1 == n {print $2}' jobs.tsv)" = success
             test "$(awk -F'\t' -v n="$c / sign" '$1 == n {print $2}' jobs.tsv)" = success
           done
+          test "$(awk -F'\t' -v n="dotlake / build (untrusted)" '$1 == n {print $2}' jobs.tsv)" = failure
+          test "$(awk -F'\t' -v n="dotlake / check" '$1 == n {print $2}' jobs.tsv)" != success
+          test "$(awk -F'\t' -v n="dotlake / sign" '$1 == n {print $2}' jobs.tsv)" != success

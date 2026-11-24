@@ -21,6 +21,11 @@
 # - `sign` runs no Lean and never sees the export. It receives result.json as a job output, never
 #   as an artifact (any job in the run, `build` included, can upload an artifact), validates it,
 #   checks that it is for this repository and commit, and has GitHub sign it.
+# - `check` and `sign` first make sure they are on one of GitHub's standard ubuntu-24.04 runners.
+#   A larger runner also reports as github-hosted, can run an image its organisation built, and its
+#   name is the organisation's choice: if one could be named ubuntu-24.04, a caller's organisation
+#   could run these jobs on an image of its own. The test reads what the runner says about itself,
+#   so it stops such a runner as it comes, not one whose image was made to lie.
 #
 # No text from the repository or the export reaches the log unescaped: the runner reads workflow
 # commands in the log, and `check` and `sign` must not take any from the developer. vacheck's own
@@ -45,8 +50,8 @@ defaults:
 
 env:
   MANIFEST: ${{ inputs.manifest }}
-  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.1/vacheck.pyz
-  VACHECK_SHA256: 8558b5a2971403d78a41954a3658ba1d5fb2a0e10e89af2b02d890500dc1bfac
+  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.1.2/vacheck.pyz
+  VACHECK_SHA256: 899e11fdd22437af4ea39c0e582f2af153ef445ff5cc523c3f09b08b797eaf20
   MAX_EXPORT: "2147483648" # 2 GiB
   # The base64 of vacheck's largest result (96,000 bytes). Job sign reads it from an environment
   # variable, and Linux caps one at 128 KiB: 131,064 characters pass and 131,072 fail.
@@ -260,6 +265,12 @@ jobs:
           python3 -I "$va/vacheck.pyz" modules "$MANIFEST" > "$va/modules"
           python3 -I "$va/theorems.py" "$va/vacheck.pyz" "$MANIFEST" > "$va/theorems"
           project=$(head -n 1 "$va/modules")
+          # Lake builds in the project's .lake: a committed one could hand the build files that the
+          # build digest does not cover. vacheck analyze rejects it too, from check's own checkout.
+          if [[ -e "$project/.lake" || -L "$project/.lake" ]]; then
+            echo "::error::The project folder's .lake is in the repository. Lake builds there, so it must not be committed (add .lake to .gitignore)."
+            exit 1
+          fi
           python3 -I "$va/vacheck.pyz" toolchain "$project/lean-toolchain" > "$va/toolchain"
           python3 -I "$va/vacheck.pyz" deps "$project/lake-manifest.json"
           echo "The manifest names $(($(wc -l < "$va/modules") - 1)) modules and $(tr -cd '\0' < "$va/theorems" | wc -c) theorems."
@@ -336,6 +347,20 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
+      # GitHub's standard runners for ubuntu-24.04: named "GitHub Actions <number>", in runner group
+      # "GitHub Actions", on GitHub's own image. A larger runner is named after its runner, and may
+      # run an image its organisation made.
+      - &standard-runner
+        name: Require a standard GitHub-hosted runner
+        run: |
+          os=$(. /etc/os-release && echo "$ID $VERSION_ID")
+          if [[ ${RUNNER_ENVIRONMENT:-} != github-hosted || ${ImageOS:-} != ubuntu24 || $os != "ubuntu 24.04" ]] \
+              || ! [[ ${ImageVersion:-} =~ ^[0-9]{8}\.[0-9]+(\.[0-9]+)?$ && ${RUNNER_NAME:-} =~ ^GitHub\ Actions\ [0-9]+$ ]]; then
+            echo "::error::This job runs only on a standard GitHub-hosted ubuntu-24.04 runner, not a larger or self-hosted one."
+            exit 1
+          fi
+          echo "Runner $RUNNER_NAME, image $ImageOS $ImageVersion, $os."
+
       # The checkout is data: vacheck reads the manifest, the lean-toolchain and the Lake files, and
       # hashes the build inputs. Nothing in it is run, built or loaded.
       - *checkout
@@ -599,6 +624,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - *standard-runner
+
       - *get-checker
 
       - name: Validate the result
