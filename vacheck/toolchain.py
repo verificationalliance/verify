@@ -1,6 +1,7 @@
 """The Lean toolchains the check supports: each one's linux x86_64 release tarball, pinned by sha256."""
 import json
 import pkgutil
+import re
 from typing import NamedTuple, Optional
 
 
@@ -13,6 +14,11 @@ class Toolchain(NamedTuple):
 def _table():
     # pkgutil reads the file through the module's loader, so this works from inside a zip too.
     return json.loads(pkgutil.get_data(__name__, 'toolchains.json').decode('utf-8'))
+
+
+def versions():
+    """The supported versions, oldest first."""
+    return sorted(_table(), key=lambda v: [int(n) for n in re.findall(r'\d+', v)])
 
 
 def lookup(version) -> Optional[Toolchain]:
