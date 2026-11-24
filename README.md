@@ -50,9 +50,17 @@ says it is a standard GitHub-hosted `ubuntu-24.04` one, which a runner image mad
 
 A review that makes a claim "Code proved" holds while the build digest stays the same. The digest
 covers every file in the repository at the checked commit except `.git`, wherever the project
-folder is, and the manifest. A symlink counts by where it points: it must point inside the
-repository, and none may sit in the project folder. So any change to any file, documentation
-included, needs a new review.
+folder is, and the manifest. So any change to any file, documentation included, needs a new review.
+
+It is the sha256 of a JSON list, sorted by path, of one entry per file:
+
+- `[path, "file", mode, sha256]` for a file, with its git mode: `100755` when it is executable,
+  else `100644`;
+- `[path, "link", target]` for a symlink, with its target as written.
+
+A symlink must be a file symlink outside the project folder whose real path is the file its target
+names inside the repository, outside `.git`. A symlink to a folder, into `.git`, outside the
+repository, or to nothing is refused.
 
 ## Releases
 
