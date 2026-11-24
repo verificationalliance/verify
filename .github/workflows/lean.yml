@@ -45,7 +45,9 @@ env:
   VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v1.0.0/vacheck.pyz
   VACHECK_SHA256: 759243a6ccfa2842e13aa91874503390f8ec146f2b9854efaa1ce0f7cceda971
   MAX_EXPORT: "2147483648" # 2 GiB
-  MAX_RESULT_B64: "921600" # 900 KiB, under GitHub's limit of 1 MB on a job's outputs
+  # GitHub counts a job's outputs as UTF-16 against 1 MiB: 524,200 base64 characters pass and
+  # 524,288 fail. 500 KiB leaves room, and fits a result.json of up to 375 KiB.
+  MAX_RESULT_B64: "512000"
   # What `lake check --paranoid` runs: Lean's kernel, then the checkers the toolchain bundles.
   KERNELS: lean,leanchecker-paranoid,lean4lean,nanoda,con-leche,con-ron
 
@@ -359,7 +361,7 @@ jobs:
           va="$RUNNER_TEMP/va"
           base64 -w0 "$va/result.json" > "$va/result.b64"
           if (( $(stat -c %s "$va/result.b64") > MAX_RESULT_B64 )); then
-            echo "::error::result.json is larger than 900 KiB in base64."
+            echo "::error::result.json is larger than 375 KiB, too large to pass to job sign."
             exit 1
           fi
           { printf 'result='; cat "$va/result.b64"; echo; } >> "$GITHUB_OUTPUT"
