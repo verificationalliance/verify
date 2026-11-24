@@ -86,7 +86,8 @@ res = {
     'schema': SCHEMA, 'repo': 'github.com/acme/proj', 'commit': 'a' * 40, 'toolchain': 'v4.36.0',
     'checker': '1.0.0', 'project': 'core', 'build_digest': 'b' * 64,
     'claims': [{'says': 'x', 'theorem': 'OSVA.affectedIn_sound', 'about': 'code', 'statement': 'st',
-                'defs': [{'name': 'OSVA.affectedIn', 'text': 'def'}], 'axioms': ['propext'],
+                'defs': [{'name': 'OSVA.affectedIn', 'text': 'def', 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 40}}],
+                'axioms': ['propext'],
                 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 56}}],
     'evidence': {'ships': ['OSVACore'], 'replaced': [{'path': 'p', 'line': 3, 'text': '@[extern "x"]'}]},
     'kernels': ['lean', 'nanoda', 'lean4lean'],
@@ -117,6 +118,12 @@ try:
 except ResultError:
     good = False
 check('result null source accepted', good)
+r2['claims'][0]['defs'][0]['source'] = None
+check('result null def source accepted', not result_rejected(lambda r: r.update(r2)))
+check('result def without its source rejected', result_rejected(lambda r: r['claims'][0]['defs'][0].pop('source')))
+check('result def source .. rejected',
+      result_rejected(lambda r: r['claims'][0]['defs'][0]['source'].update(path='a/../b')))
+check('result def source line 0 rejected', result_rejected(lambda r: r['claims'][0]['defs'][0]['source'].update(line=0)))
 
 check('result extra key rejected', result_rejected(lambda r: r.update(extra=1)))
 check('result claim extra key rejected', result_rejected(lambda r: r['claims'][0].update(extra=1)))
@@ -133,7 +140,8 @@ check('result source line 0 rejected', result_rejected(lambda r: r['claims'][0][
 check('result statement 4001 rejected', result_rejected(lambda r: r['claims'][0].update(statement='a' * 4001)))
 check('result def text 4001 rejected',
       result_rejected(lambda r: r['claims'][0]['defs'][0].update(text='a' * 4001)))
-check('result 21 defs rejected', result_rejected(lambda r: r['claims'][0].update(defs=[{'name': 'n', 'text': 't'}] * 21)))
+check('result 21 defs rejected',
+      result_rejected(lambda r: r['claims'][0].update(defs=[{'name': 'n', 'text': 't', 'source': None}] * 21)))
 check('result 0 claims rejected', result_rejected(lambda r: r.update(claims=[])))
 check('result 21 claims rejected', result_rejected(lambda r: r.update(claims=[r['claims'][0]] * 21)))
 check('result 201 replaced rejected',
@@ -144,7 +152,7 @@ check('result bad schema rejected', result_rejected(lambda r: r.update(schema='x
 check('result about both rejected', result_rejected(lambda r: r['claims'][0].update(about='both')))
 check('result bool line rejected', result_rejected(lambda r: r['claims'][0]['source'].update(line=True)))
 check('result over 1 MB rejected', result_rejected(
-    lambda r: r.update(claims=[dict(r['claims'][0], defs=[{'name': 'n', 'text': 'a' * 4000}] * 20)] * 20)))
+    lambda r: r.update(claims=[dict(r['claims'][0], defs=[{'name': 'n', 'text': 'a' * 4000, 'source': None}] * 20)] * 20)))
 try:
     validate_result([])
     good = False
@@ -167,6 +175,7 @@ TEXT_FIELDS = {
     'def name': lambda r, v: r['claims'][0]['defs'][0].update(name='a' + v),
     'def text': lambda r, v: r['claims'][0]['defs'][0].update(text='a' + v),
     'source path': lambda r, v: r['claims'][0]['source'].update(path='a' + v),
+    'def source path': lambda r, v: r['claims'][0]['defs'][0]['source'].update(path='a' + v),
     'replaced path': lambda r, v: r['evidence']['replaced'][0].update(path='a' + v),
     'replaced text': lambda r, v: r['evidence']['replaced'][0].update(text='a' + v),
     'ship': lambda r, v: r['evidence'].update(ships=['a' + v]),
@@ -215,7 +224,7 @@ def of_size(n):
         if len(r['claims'][-1]['defs']) == 20:
             r['claims'].append(dict(copy.deepcopy(res['claims'][0]), defs=[]))
             continue
-        r['claims'][-1]['defs'].append({'name': 'n', 'text': ''})
+        r['claims'][-1]['defs'].append({'name': 'n', 'text': '', 'source': None})
         d = r['claims'][-1]['defs'][-1]
         d['text'] = 'a' * max(0, min(4000, n - canonical_size(r)))
     return r
@@ -706,6 +715,7 @@ def valid(r):
     return True
 
 
+F_DEF = {'name': 'Good.f', 'text': '<pp Good.f>', 'source': {'path': 'core/Good.lean', 'line': 3}}
 good_tree = attempt(lambda: source_tree('good', [('Never \u202eleaks\x07.', 'Good.«key never leaves»', 'code'),
                                                  ('f is n + 1, or not.', 'Good.t1', 'model')], ships=['Good']))
 good_res = attempt(lambda: run('good', tree=good_tree)) or {}
@@ -716,8 +726,8 @@ check('good passes', valid(good_res)
       == [{'path': 'core/Good.lean', 'line': 7}, {'path': 'core/Good.lean', 'line': 5}])
 check('good statements, defs and axioms',
       [(c.get('statement'), c.get('defs'), c.get('axioms')) for c in gc]
-      == [('<pp Good.«key never leaves»>', [{'name': 'Good.f', 'text': '<pp Good.f>'}], []),
-          ('<pp Good.t1>', [{'name': 'Good.f', 'text': '<pp Good.f>'}], ['Classical.choice', 'Quot.sound', 'propext'])])
+      == [('<pp Good.«key never leaves»>', [F_DEF], []),
+          ('<pp Good.t1>', [F_DEF], ['Classical.choice', 'Quot.sound', 'propext'])])
 check('good says plain and about as declared',
       [(c.get('says'), c.get('about')) for c in gc] == [('Never leaks.', 'code'), ('f is n + 1, or not.', 'model')])
 check('good carries the run and the evidence',
@@ -761,6 +771,10 @@ check('replaced listed', valid(rep) and rep['evidence']['replaced']
       == [{'path': 'core/Replaced.lean', 'line': 5, 'text': '@[implemented_by doubleImpl]'}])
 
 
+with open(os.path.join(FIXTURES, 'good', 'Good.lean'), encoding='utf-8') as f:
+    GOOD_LINES = f.read().count('\n')
+
+
 def long_replaced():
     root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
     write(os.path.join(root, 'core', 'Good.lean'), '\n   @[extern "\u2066%s"] opaque g : Nat\n' % ('a' * 300), 'a')
@@ -768,7 +782,7 @@ def long_replaced():
 
 
 check('replaced lines trimmed to 160 plain characters',
-      attempt(long_replaced) == [{'path': 'core/Good.lean', 'line': 11, 'text': ('@[extern "' + 'a' * 300)[:160]}])
+      attempt(long_replaced) == [{'path': 'core/Good.lean', 'line': GOOD_LINES + 2, 'text': ('@[extern "' + 'a' * 300)[:160]}])
 
 
 def with_file(rel, text):
@@ -810,23 +824,53 @@ def append(rel, text=' '):
     return lambda root: write(os.path.join(root, rel), text, 'a')
 
 
-ds = attempt(lambda: digests(append('README.md'), append('core/README.md'), append('core/Good.lean', '\n-- x\n')))
-check('build digest changes with a lean file and not with README.md',
-      ds is not None and is_sha256(ds[0]) and ds[0] == ds[1] == ds[2] != ds[3])
-# Every build input in the checkout: Lake compiles sources from outside the project (srcDir := "../src")
-# and from folders named .lake below the project's own.
+ds = attempt(lambda: digests(append('README.md'), append('core/Good.lean', '\n-- x\n')))
+check('build digest changes with a lean file and not with a README outside the project',
+      ds is not None and is_sha256(ds[0]) and ds[0] == ds[1] != ds[2])
+# Every build input in the checkout: every file in the project folder (C sources for an extern_lib,
+# scripts and data a lakefile uses), and every .lean and Lake file anywhere: Lake compiles sources
+# from outside the project (srcDir := "../src") and from folders named .lake below the project's own.
 covered = ('core/lakefile.toml', 'core/lake-manifest.json', 'core/lean-toolchain', '.verificationalliance.json',
            'core/lakefile.lean', 'core/Good/Sub.lean', 'core/Good/.lake/Y.lean', 'Top.lean', 'src/X.lean',
-           'other/lakefile.toml', 'other/lake-manifest.json', 'other/lean-toolchain', 'core/.git/Z.lean')
+           'other/lakefile.toml', 'other/lake-manifest.json', 'other/lean-toolchain', 'core/.git/Z.lean',
+           'core/ffi/shim.c', 'core/include/shim.h', 'core/build.sh', 'core/README.md', 'core/Good.olean',
+           'core/.hidden/data.bin', 'core/Good/.lake/build/lib.a')
 ds = attempt(lambda: digests(*[append(rel) for rel in covered]))
-check('build digest covers every lean and lake file in the checkout, and the manifest',
+check('build digest covers every file in the project, every lean and lake file in the checkout, and the manifest',
       ds is not None and len(set(ds)) == len(covered) + 1)
-ds = attempt(lambda: digests(append('core/.lake/build/X.lean'), append('.git/X.lean'), append('core/Good.olean'),
-                             append('other/README.md')))
-check("build digest leaves out the project's .lake, the root .git and other files",
+ds = attempt(lambda: digests(append('.git/X.lean'), append('other/README.md'), append('other/shim.c')))
+check('build digest leaves out the root .git and other files outside the project',
       ds is not None and len(set(ds)) == 1)
 
-BIG = 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
+
+def committed_lake(rel, project='core'):
+    """The AnalysisError message of analyze, and of import_roots, on a tree with `rel` added."""
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')], project=project)
+    write(os.path.join(root, rel), 'x')
+    return (analysis_error(lambda: run('good', tree=(root, manifest))),
+            analysis_error(lambda: va.import_roots(root, project)))
+
+
+LAKE_COMMITTED = '.lake is in the repository: Lake builds there, so it must not be committed (add .lake to .gitignore)'
+check("a committed .lake in the project folder rejected, by analyze and by import_roots",
+      attempt(lambda: committed_lake('core/.lake/build/X.olean')) == ('core/' + LAKE_COMMITTED,) * 2
+      and attempt(lambda: committed_lake('.lake/packages/x', project='.')) == (LAKE_COMMITTED,) * 2)
+
+
+def lake_symlink():
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    os.symlink(OUTSIDE_DIR, os.path.join(root, 'core', '.lake'))
+    return analysis_error(lambda: run('good', tree=(root, manifest)))
+
+
+OUTSIDE_DIR = fresh('outside-dir')
+os.makedirs(OUTSIDE_DIR)
+check('a .lake symlink in the project folder rejected too', attempt(lake_symlink) == 'core/' + LAKE_COMMITTED)
+check('a .lake folder outside the project folder is no reason to reject',
+      is_sha256((attempt(lambda: with_file('other/.lake/X.lean', 'x')) or {}).get('build_digest')))
+
+# A second declaration of Good.t1: read, it makes the source of Good.t1 ambiguous, so null.
+BIG = 'namespace Good\ntheorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
 
 
 def big_file(size):
@@ -847,16 +891,14 @@ check('a lean file of 3 MiB changes the digest and is not read as text',
       attempt(lambda: big_file(3 * 1024 * 1024)) == NOT_READ)
 check('a lean file over 2 MiB is not read as text', attempt(lambda: big_file(MB2 + 1)) == NOT_READ)
 check('a lean file of 2 MiB is read', attempt(lambda: big_file(MB2))
-      == ({'path': 'core/A.lean', 'line': 1},
-          [{'path': 'core/A.lean', 'line': 2, 'text': '@[extern "x"] opaque y : Nat'}], True))
+      == (None, [{'path': 'core/A.lean', 'line': 3, 'text': '@[extern "x"] opaque y : Nat'}], True))
 
 
 def total_cap(slack):
     """analyze with the cap on the bytes hashed set to the good tree's inputs plus `slack`."""
     tree = source_tree('good', [('x', 'Good.t1', 'model')])
-    total = sum(os.path.getsize(os.path.join(tree[0], rel)) for rel in (
-        'core/Good.lean', 'core/lakefile.toml', 'core/lake-manifest.json', 'core/lean-toolchain',
-        '.verificationalliance.json'))
+    total = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(os.path.join(tree[0], 'core')) for f in fs)
+    total += os.path.getsize(os.path.join(tree[0], '.verificationalliance.json'))
     saved = va.MAX_TOTAL
     va.MAX_TOTAL = total + slack
     try:
@@ -1009,13 +1051,13 @@ check('a replaced line is shown with tabs as spaces and without hidden character
 
 # Steps 6 and 7 read no file in a folder named .lake or .git, at any depth: there are Lake's builds
 # and packages, and git's objects. Step 8 still hashes them. Both files sort before core/Good.lean.
-UNREAD_TEXT = 'theorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
+UNREAD_TEXT = 'namespace Good\ntheorem t1 : True := trivial\n@[extern "x"] opaque y : Nat\n'
 
 
 def unread_folders():
     root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
     before = run('good', tree=(root, manifest))
-    for rel in ('core/.git/B.lean', 'core/A/.lake/C.lean'):
+    for rel in ('core/.git/B.lean', 'core/A/.lake/C.lean'):  # core/.lake itself is rejected
         write(os.path.join(root, rel), UNREAD_TEXT)
     after = run('good', tree=(root, manifest))
     return (after['claims'][0]['source'], after['evidence']['replaced'],
@@ -1025,7 +1067,7 @@ def unread_folders():
 check('no text read in .lake or .git folders at any depth, which are still hashed',
       attempt(unread_folders) == ({'path': 'core/Good.lean', 'line': 5}, [], True))
 check('the same files outside those folders are read',
-      (lambda r: r is not None and r['claims'][0]['source'] == {'path': 'core/A/C.lean', 'line': 1}
+      (lambda r: r is not None and r['claims'][0]['source'] is None
        and len(r['evidence']['replaced']) == 1)(attempt(lambda: with_file('core/A/C.lean', UNREAD_TEXT))))
 
 # More than one reference: one per library of the toolchain. A name is the library's when any of
@@ -1058,7 +1100,7 @@ check('import roots: a comment line and an import later on a line are not import
       attempt(lambda: roots_of({'core/A.lean': '-- import LeanChecker\ndef x := 1 -- import LeanIR\nimported Leanc\n'})) == [])
 check('import roots: only the project, never .lake or .git, never a file over 2 MiB',
       attempt(lambda: roots_of({'core/A.lean': 'import Std\n', 'other/B.lean': 'import LeanChecker\n',
-                                'core/.lake/C.lean': 'import LeanIR\n', 'core/x/.git/D.lean': 'import Leanc\n',
+                                'core/x/.lake/C.lean': 'import LeanIR\n', 'core/x/.git/D.lean': 'import Leanc\n',
                                 'core/Big.lean': 'import LakeMain\n' + ' ' * (2 * 1024 * 1024)})) == ['Std'])
 check('import roots: a line that only looks like an import still counts, so more is compared',
       attempt(lambda: roots_of({'core/A.lean': '/-\nimport LeanChecker\n-/\n'})) == ['LeanChecker'])
@@ -1072,6 +1114,203 @@ def symlinked_import():
 
 
 check('import roots: a symlinked .lean file raises', analysis_error(symlinked_import) == SYMLINKS + 'core/L.lean')
+
+# vacheck 1.1.2. A claim's source is where the source declares that theorem by its full name, from
+# the namespaces open around it, and so is a definition's; none when no declaration or more than one
+# has the name. Comments, strings and character literals do not count.
+def source_of(files, names=('Good.t1',)):
+    """The sources analyze gives the claim on each of `names` (with the good tree's Good.lean
+    replaced by files['core/Good.lean'] when given) and of Good.f, its definition."""
+    root, manifest = source_tree('good', [('x', n, 'model') for n in names])
+    for rel, text in files.items():
+        write(os.path.join(root, rel), text)
+    r = run('good', tree=(root, manifest))
+    return [c['source'] for c in r['claims']] + [d['source'] for d in r['claims'][0]['defs']]
+
+
+def at(path, line):
+    return {'path': path, 'line': line}
+
+
+GOOD_SRC = at('core/Good.lean', 5), at('core/Good.lean', 3)
+check('a theorem of the same last name in another namespace is not the claim\'s source',
+      attempt(lambda: source_of({'core/A.lean': 'namespace Bad\ntheorem t1 : True := trivial\ndef f := 1\nend Bad\n'}))
+      == list(GOOD_SRC))
+check('nor one at the top level, nor in a namespace whose name ends the same',
+      attempt(lambda: source_of({'core/A.lean': 'theorem t1 : True := trivial\nnamespace NotGood\ntheorem t1 : True := trivial\n'
+                                                 'end NotGood\ntheorem Bad.Good.t1 : True := trivial\n'})) == list(GOOD_SRC))
+check('a second declaration with the full name makes the source null',
+      attempt(lambda: source_of({'core/A.lean': 'namespace Good\ntheorem t1 : True := trivial\nend Good\n'})) == [None, GOOD_SRC[1]])
+check('the full name from nested namespaces, a dotted namespace, a dotted declaration and _root_',
+      attempt(lambda: source_of({'core/Good.lean': 'namespace X\nnamespace Y.Z\ntheorem _root_.Good.t1 : True := trivial\nend Y.Z\n'
+                                                     'end X\nnamespace «Good»\ndef «f» := 1\nend Good\n'})) == [at('core/Good.lean', 3), at('core/Good.lean', 7)])
+check('a section, a noncomputable section and mutual add nothing to the name',
+      attempt(lambda: source_of({'core/Good.lean': 'namespace Good\nsection S\nnoncomputable section\nmutual\n'
+                                                     'theorem t1 : True := trivial\nend\nend\nend S\n@[simp] protected def f := 1\nend Good\n'}))
+      == [at('core/Good.lean', 5), at('core/Good.lean', 9)])
+check('a declaration in a comment, a nested comment, a docstring, a string or after a char literal does not count',
+      attempt(lambda: source_of({'core/A.lean': '-- namespace Good\n/- /- -/\nnamespace Good\ntheorem t1 -/\n/-- doc\n'
+                                                 'namespace Good\ntheorem t1 : True := trivial -/\ndef s := "\nnamespace Good\ntheorem t1 : True\n"\n'
+                                                 "def c := '\"'\ndef r := r#\"\nnamespace Good\ntheorem t1\"#\n"})) == list(GOOD_SRC))
+check('a private declaration of the name is not its source (Lean gives it another name)',
+      attempt(lambda: source_of({'core/A.lean': 'namespace Good\nprivate theorem t1 : True := trivial\nend Good\n'})) == list(GOOD_SRC))
+check('after an end that closes what is not open, nothing more in that file is a source',
+      attempt(lambda: source_of({'core/A.lean': 'namespace Bad\nend Worse\nnamespace Good\ntheorem t1 : True := trivial\nend Good\n'}))
+      == list(GOOD_SRC))
+check('a theorem with universe parameters, t1.{u}, has its source',
+      attempt(lambda: source_of({'core/Good.lean': 'namespace Good\ntheorem t1.{u} : True := trivial\ndef f := 1\nend Good\n'}))
+      == [at('core/Good.lean', 2), at('core/Good.lean', 3)])
+check('a «» name in the manifest matches the source as Lean reads it',
+      attempt(lambda: source_of({}, names=('Good.«key never leaves»', 'Good.«t1»'))) == [at('core/Good.lean', 7), GOOD_SRC[0], GOOD_SRC[1]])
+def hostile_scan():
+    import time
+    start = time.monotonic()
+    for text in ('«' * (MB2 // 2), '/-' * (MB2 // 2), '"' * MB2, 'r#"' * (MB2 // 3), "'" * MB2, 'namespace A\n' * (MB2 // 12)):
+        va.declarations(text)
+    return time.monotonic() - start < 20
+
+
+check('hostile source text is scanned in linear time', attempt(hostile_scan) is True)
+
+check('components: «» kept whole, a bad name refused',
+      [attempt(lambda n=n: va.components(n)) for n in ('A.«b.c».d', 'A..b', 'A.', '«a', 'a«b»')]
+      == [('A', 'b.c', 'd'), None, None, None, None])
+
+# vacheck 1.1.2. Definitions are shown as nanoda_bin prints them from the checked export, made
+# readable: an inductive type with its constructors, a definition compiled through a recursor or a
+# match by its header, and names with macro scopes as Lean shows them.
+NANO = {
+    'Good.f': 'def Good.f (n : Nat) : Nat := HAdd.hAdd n (OfNat.ofNat 1)',
+    'Good.Range': 'inductive Good.Range : Type 0',
+    'Good.Range.mk': 'constructor Good.Range.mk : Nat → Nat → Good.Range',
+    'Good.anyIn': 'def Good.anyIn (rs : List Good.Range) (x._@.Init.Prelude.1._hygCtx._hyg.10 : Nat) : Bool :=\n  List.any rs\n'
+                  '    (fun (x._@.Good.2._hygCtx._hyg.9 : Good.Range) =>\n    Good.Range.contains x._@.Good.2._hygCtx._hyg.9 '
+                  'x._@.Init.Prelude.1._hygCtx._hyg.10)',
+    'Good.lowest': 'def Good.lowest (a._@._internal._hyg.0 : List Nat) : Nat := List.brecOn a._@._internal._hyg.0 Good.lowest._f',
+    'Good.pick': 'def Good.pick (o : Option Nat) : Nat :=\n  Good.pick.match_1 (fun (o._@.Good.3._hygCtx._hyg.8 : Option Nat) => Nat) o\n'
+                 '    (fun (_ : Unit) => OfNat.ofNat 0) (fun (n : Nat) => n)',
+}
+
+
+def nano(over=None):
+    """A printer that prints as nanoda_bin does, with `over` in place of some of its texts."""
+    table = dict(NANO, **(over or {}))
+    return lambda names: {n: table.get(n, 'theorem %s : True' % n) for n in names}
+
+
+def shown(over=None, claims=('Good.anyIn_nil', 'Good.pick_lowest')):
+    r = run('good', claims, pp=nano(over))
+    return {d['name']: d['text'] for c in r['claims'] for d in c['defs']}
+
+
+sh = attempt(shown) or {}
+check('a structure is shown with its constructor and the fields, named, of the checked export',
+      sh.get('Good.Range') == 'inductive Good.Range : Type 0\nconstructor:\n  Good.Range.mk (lo hi : Nat) : Good.Range')
+check('the constructor printer is asked for, and only for inductive types',
+      attempt(lambda: (lambda seen: (run('good', ['Good.anyIn_nil', 'Good.t1'], pp=lambda n: seen.extend(n) or nano()(n)), seen)[1])([]))
+      == ['Good.anyIn_nil', 'Good.t1', 'Good.Range', 'Good.anyIn', 'Good.f', 'Good.Range.mk'])
+check('a definition through structural recursion is shown by its header',
+      sh.get('Good.lowest') == 'def Good.lowest (a✝ : List Nat) : Nat\n  ' + va.COMPILED_NOTE
+      and va.COMPILED_NOTE == '(body compiled; see source)')
+check('a definition through a match is shown by its header',
+      sh.get('Good.pick') == 'def Good.pick (o : Option Nat) : Nat\n  ' + va.COMPILED_NOTE)
+check('a definition compiled through nothing is shown whole, its macro-scoped names as Lean shows them',
+      sh.get('Good.anyIn') == 'def Good.anyIn (rs : List Good.Range) (x✝ : Nat) : Bool :=\n  List.any rs\n'
+      '    (fun (x✝¹ : Good.Range) =>\n    Good.Range.contains x✝¹ x✝)')
+check('Good.f is shown whole', (attempt(lambda: run('good', ['Good.t1'], pp=nano())) or {}).get('claims', [{}])[0].get('defs')
+      == [{'name': 'Good.f', 'text': NANO['Good.f'], 'source': at('core/Good.lean', 3)}])
+for why, text in (('a string in it', 'def Good.lowest (s : Foo ":= x") : Nat := List.brecOn s Good.lowest._f'),
+                  ('a string with := in it, outside brackets', 'def Good.lowest : Foo "x := y" := List.brecOn s Good.lowest._f'),
+                  ('a let in it', 'def Good.lowest (a : let n : Nat := 3; Fin n) : Nat := List.brecOn a Good.lowest._f'),
+                  ('a let outside brackets', 'def Good.lowest : let n : Nat := 3; Fin n := List.brecOn a Good.lowest._f'),
+                  (':= in a «» name', 'def Good.lowest (a : «A := b») : Nat := List.brecOn a Good.lowest._f'),
+                  ('no :=', 'def Good.lowest : Nat')):
+    check('a compiled definition with %s in its header is shown whole' % why,
+          (attempt(lambda: shown({'Good.lowest': text})) or {}).get('Good.lowest') == va._hygiene(text))
+for why, text in (('an extra arrow', 'constructor Good.Range.mk : Nat → (Nat → Nat) → Nat → Good.Range'),
+                  ('a forall', 'constructor Good.Range.mk : forall (n : Nat), Nat → Good.Range'),
+                  ('binders before the colon', 'constructor Good.Range.mk (lo : Nat) : Nat → Good.Range'),
+                  ('a string', 'constructor Good.Range.mk : Foo "→" → Nat → Good.Range'),
+                  ('unbalanced brackets', 'constructor Good.Range.mk : (Nat → Nat → Good.Range')):
+    check('a constructor printed with %s is shown as nanoda_bin printed it' % why,
+          (attempt(lambda: shown({'Good.Range.mk': text})) or {}).get('Good.Range')
+          == 'inductive Good.Range : Type 0\nconstructor:\n  ' + text[len('constructor '):])
+check('a field of a function type is kept in its brackets, and a long constructor broken per field',
+      (attempt(lambda: shown({'Good.Range.mk': 'constructor Good.Range.mk : (Nat → Nat) → List (Option (Prod Nat Nat)) '
+                                                 '→\n    Good.Range'})) or {}).get('Good.Range')
+      == 'inductive Good.Range : Type 0\nconstructor:\n  Good.Range.mk (lo : Nat → Nat) (hi : List (Option (Prod Nat Nat))) : Good.Range'
+      and (attempt(lambda: shown({'Good.Range.mk': 'constructor Good.Range.mk : %s → %s → Good.Range' % ('A' * 50, 'B' * 50)}))
+           or {}).get('Good.Range')
+      == 'inductive Good.Range : Type 0\nconstructor:\n  Good.Range.mk\n    (lo : %s)\n    (hi : %s) : Good.Range' % ('A' * 50, 'B' * 50))
+
+check('fields: names, binder info and whether a later binder depends on each, after the parameters',
+      [attempt(lambda n=n: vx.fields(good, n)) for n in ('Good.Range.mk', 'Exists.intro', 'Nat.le.step')]
+      == [[('lo', 'default', False), ('hi', 'default', False)], [('w', 'default', True), ('h', 'default', False)],
+          [('m', 'implicit', True), (None, 'default', False)]]
+      and attempt(lambda: vx.parameters(good, 'Exists.intro')) == 2)
+check('a constructor without parameters is shown with its fields, one with parameters as nanoda_bin printed it',
+      [attempt(lambda n=n, t=t: va._constructor(good, n, t)) for n, t in (
+          ('Nat.succ', 'constructor Nat.succ : Nat → Nat'),
+          ('Option.some', 'constructor Option.some.{u} {α : Type u} : α → Option α'),
+          ('Option.some', 'constructor Option.some : α → Option α'),
+          ('Exists.intro', 'constructor Exists.intro.{u} {α : Sort u} {p : α → Prop} (w : α) : p w → Exists p'))]
+      == ['Nat.succ (n : Nat) : Nat', 'Option.some.{u} {α : Type u} : α → Option α', 'Option.some : α → Option α',
+          'Exists.intro.{u} {α : Sort u} {p : α → Prop} (w : α) : p w → Exists p'])
+
+def many_constructors():
+    printed = dict(NANO, **{'Good.Range.mk': 'constructor Good.Range.mk : ' + 'Nat → ' * 30 + 'Good.Range'})
+    text = va._definition(good, 'Good.Range', printed, {'Good.Range': ['Good.Range.mk'] * 100})
+    return len(text) <= 4000, text.endswith('\n  … and %d more' % (100 - text.count('\n  Good.Range.mk'))), text.count('\n  Good.Range.mk')
+
+
+check('an inductive type of many constructors is cut at 4,000 characters, saying how many are left out',
+      (lambda r: r is not None and r[0] and r[1] and 10 < r[2] < 100)(attempt(many_constructors)))
+
+
+def compiled_through(*consts):
+    """Good.f shown as if its value mentioned exactly these constants."""
+    saved = va.value_constants
+    va.value_constants = lambda env, name: frozenset(consts)
+    try:
+        return va._definition(good, 'Good.f', {'Good.f': 'def Good.f :\n  Nat → Nat :=\n  Nat.succ _'}, {})
+    finally:
+        va.value_constants = saved
+
+
+check('a definition through well-founded recursion is shown by its header, on one line when it fits',
+      attempt(lambda: compiled_through('WellFounded.fix', 'Nat')) == 'def Good.f : Nat → Nat\n  ' + va.COMPILED_NOTE)
+check('each auxiliary of compiled recursion and match counts on its own; other constants do not',
+      [attempt(lambda c=c: compiled_through(c)).endswith(va.COMPILED_NOTE) for c in (
+          'List.brecOn', 'List.binductionOn', 'List.below', 'Nat.rec', 'Nat.recOn', 'Option.casesOn', 'Good.pick.match_1',
+          'Good.lowest._f', 'Good.g._unary', 'Good.g._mutual', 'WellFounded.fixF', 'List.any', 'Good.recorder', 'Good.match_x',
+          'Good.my_f')]
+      == [True] * 11 + [False] * 4)
+
+
+def with_fields(fs):
+    saved = va.fields
+    va.fields = lambda env, ctor: fs
+    try:
+        return va._constructor(good, 'Good.Range.mk', NANO['Good.Range.mk'])
+    finally:
+        va.fields = saved
+
+
+check('a constructor whose fields the export says are dependent, implicit or unnamed is shown as printed',
+      [attempt(lambda fs=fs: with_fields(fs)) for fs in (
+          [('lo', 'default', True), ('hi', 'default', False)], [('lo', 'implicit', False), ('hi', 'default', False)],
+          [(None, 'default', False), ('hi', 'default', False)], None)]
+      == ['Good.Range.mk : Nat → Nat → Good.Range'] * 4
+      and attempt(lambda: with_fields([('lo', 'default', False), ('hi', 'default', False)])) == 'Good.Range.mk (lo hi : Nat) : Good.Range')
+check('names with macro scopes: one per name, numbered when two differ, constants too, «» names untouched',
+      [attempt(lambda t=t: va._hygiene(t)) for t in (
+          'f x._@.M._hyg.1 x._@.M._hyg.1', '(x._@.M._hyg.1 : A) (x._@.N._hygCtx._hyg.2 : B) y._@.M._hyg.3',
+          'Foo.bar._@.M.1._hygCtx._hyg.4 «x._@.M._hyg.1» x._@.M._hyg.5z', 'plain text')]
+      == ['f x✝ x✝', '(x✝ : A) (x✝¹ : B) y✝', 'Foo.bar✝ «x._@.M._hyg.1» x._@.M._hyg.5z',
+          'plain text'])
+check('a statement is shown with its macro-scoped names as Lean shows them',
+      (attempt(lambda: run('good', ['Good.t1'], pp=nano({'Good.t1': 'theorem Good.t1 (x._@.M._hyg.1 : Nat) : True'})))
+       or {}).get('claims', [{}])[0].get('statement') == 'theorem Good.t1 (x✝ : Nat) : True')
 
 # Messages go to the developer's log in a job that holds a token. GitHub's runner reads `::command::`
 # at the start of a line and the legacy `##[command]` anywhere in one, and may skip invisible

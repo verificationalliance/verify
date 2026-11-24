@@ -22,7 +22,7 @@ export_case() {
   test -s "$case.ndjson"
 }
 
-export_case good Good Good.f Good.t1 'Good.«key never leaves»'
+export_case good Good Good.f Good.t1 'Good.«key never leaves»' Good.anyIn_nil Good.pick_lowest
 export_case sorry Sorry Sorry.t
 export_case axiom Axiom Axiom.magic Axiom.t
 export_case native Native Native.t

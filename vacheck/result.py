@@ -85,18 +85,23 @@ def _claim(c):
         _fail('about must be code or model')
     _str(c['statement'], 'statement', 4000, newlines=True)
     for d in _list(c['defs'], 'defs', 0, 20):
-        _keys(d, ('name', 'text'), 'def')
+        _keys(d, ('name', 'text', 'source'), 'def')
         _str(d['name'], 'def name')
         _str(d['text'], 'def text', 4000, newlines=True)
+        _source(d['source'], 'def source')
     for a in _list(c['axioms'], 'axioms', 0, 3):
         if a not in ALLOWED_AXIOMS:
             _fail('axiom not allowed')
-    src = c['source']
+    _source(c['source'], 'source')
+
+
+def _source(src, what):
+    """Where the source declares a name: None, or {path, line}."""
     if src is not None:
-        _keys(src, ('path', 'line'), 'source')
-        _path(src['path'], 'source path')
-        if _int(src['line'], 'source line') < 1:
-            _fail('source line must be at least 1')
+        _keys(src, ('path', 'line'), what)
+        _path(src['path'], what + ' path')
+        if _int(src['line'], what + ' line') < 1:
+            _fail(what + ' line must be at least 1')
 
 
 def validate_result(obj):

@@ -369,6 +369,30 @@ class Env:
                     stack.append(node[i])
         return out
 
+    def _mentions_bvar(self, root):
+        """Whether the expression mentions the bound variable just outside it (de Bruijn index 0 at
+        its top), under any number of binders."""
+        stack, seen, exprs = [(root, 0)], set(), self._exprs
+        while stack:
+            e, depth = stack.pop()
+            if (e, depth) in seen:
+                continue
+            seen.add((e, depth))
+            node = exprs[e]
+            tag = node[0]
+            if tag == 'bvar':
+                if node[1] == depth:
+                    return True
+            elif tag in ('lam', 'forallE'):
+                stack.append((node[2], depth))
+                stack.append((node[3], depth + 1))
+            elif tag == 'letE':
+                stack.extend(((node[2], depth), (node[3], depth), (node[4], depth + 1)))
+            else:
+                for i in _EXPR_KIDS[tag]:
+                    stack.append((node[i], depth))
+        return False
+
     def _name_hash(self, c):
         memo = self._nhash
         chain = []
@@ -515,6 +539,54 @@ def constants_in_type(env, name):
     d = env._decls[env._decl(name)]
     seen = bytearray(len(env._exprs))
     return frozenset(env._render(c) for c in env._constants([d.fields['type']], seen, literals=False))
+
+
+def value_constants(env, name):
+    """The constants that the value of `name` mentions (none when it has no value)."""
+    d = env._decls[env._decl(name)]
+    if 'value' not in d.fields:
+        return frozenset()
+    seen = bytearray(len(env._exprs))
+    return frozenset(env._render(c) for c in env._constants([d.fields['value']], seen, literals=False))
+
+
+def constructors(env, name):
+    """The constructors of the inductive type `name`, in their order; ExportError if it is not one."""
+    d = env._decls[env._decl(name)]
+    if d.kind != 'inductive':
+        raise ExportError('%s is not an inductive type' % str(name)[:200])
+    return [env._render(c) for c in d.fields['ctors']]
+
+
+def parameters(env, name):
+    """The number of parameters of an inductive type or a constructor."""
+    d = env._decls[env._decl(name)]
+    if d.kind not in ('inductive', 'ctor'):
+        raise ExportError('%s is neither an inductive type nor a constructor' % str(name)[:200])
+    return d.fields['numParams']
+
+
+def fields(env, ctor):
+    """The fields of constructor `ctor`, after its parameters, as (name, binder info, dependent): the
+    binder's name as one plain identifier, or None when it is anonymous, has more than one component
+    or is not an identifier; and whether a later binder or the result mentions it. None when the
+    type is not a chain of that many binders (an mdata node, for one)."""
+    d = env._decls[env._decl(ctor)]
+    if d.kind != 'ctor':
+        raise ExportError('%s is not a constructor' % str(ctor)[:200])
+    e, params, count = d.fields['type'], d.fields['numParams'], d.fields['numFields']
+    out = []
+    for i in range(params + count):
+        node = env._exprs[e]
+        if node[0] != 'forallE':
+            return None
+        _, binder, _, body, info = node
+        if i >= params:
+            pre, comp = env._parts[binder] if binder != 0 else (None, None)
+            plain = pre == 0 and type(comp) is str and _escape(comp) == comp and '»' not in comp
+            out.append((comp if plain else None, info, env._mentions_bvar(body)))
+        e = body
+    return out
 
 
 def digest(env, name):
