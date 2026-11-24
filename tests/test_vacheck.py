@@ -365,6 +365,55 @@ d_binder = binder_digest('x', 'default', 0)
 check('digest ignores binder names and binder info',
       is_sha256(d_binder) and d_binder == binder_digest('y', 'implicit', 0) != binder_digest('x', 'default', 1))
 
+# What the digest is for: a `prelude` project can declare a library name with the real type and
+# another body. Each pair below differs in one thing only, and must not share a digest.
+BODIES = [META] + ['{"in":%d,"str":{"pre":0,"str":"%s"}}' % (i + 1, n) for i, n in enumerate('tab')] + [
+    '{"il":1,"succ":0}', '{"il":2,"succ":1}',
+    '{"ie":0,"const":{"name":2,"us":[]}}', '{"ie":1,"const":{"name":3,"us":[]}}',
+    '{"ie":2,"natVal":"5"}', '{"ie":3,"natVal":"6"}', '{"ie":4,"strVal":"x"}', '{"ie":5,"strVal":"y"}',
+    '{"bvar":0,"ie":6}', '{"bvar":1,"ie":7}', '{"ie":8,"sort":1}', '{"ie":9,"sort":2}']
+A, B, FIVE, SIX, X, Y, BVAR0, BVAR1, SORT1, SORT2 = range(10)
+
+
+def body_digest(value, record='def', type_=SORT1):
+    """Digest of `t : type_ := value`, a def or a theorem, both expressions taken from BODIES."""
+    fields = '"name":1,"levelParams":[],"type":%d,"value":%d,"all":[1]' % (type_, value)
+    decl = ('{"def":{%s,"hints":"abbrev","safety":"safe"}}' if record == 'def' else '{"thm":{%s}}') % fields
+    return attempt(lambda: vx.digest(vx.load_export(export_file(BODIES + [decl])), 't'))
+
+
+def differ(*pairs):
+    return all(is_sha256(d1) and is_sha256(d2) and d1 != d2 for d1, d2 in pairs)
+
+
+check('digest covers the body', differ((body_digest(A), body_digest(SORT1)),
+                                       (body_digest(A, 'thm'), body_digest(SORT1, 'thm'))))
+check('digest covers the type', differ((body_digest(A, type_=SORT1), body_digest(A, type_=SORT2))))
+check('digest covers which constant is named', differ((body_digest(A), body_digest(B))))
+check('digest covers literals', differ((body_digest(FIVE), body_digest(SIX)), (body_digest(X), body_digest(Y))))
+check('digest covers bvar indices', differ((body_digest(BVAR0), body_digest(BVAR1))))
+check('digest covers universe levels below the top', differ((body_digest(SORT1), body_digest(SORT2))))
+
+
+def block_digests(mk2_type):
+    """Digests of T, T.mk1 and T.rec in a block where only the type of T.mk2 varies: T, or a → T."""
+    lines = [META] + ['{"in":%d,"str":{"pre":%d,"str":"%s"}}' % (i + 1, p, n) for i, (p, n) in
+                      enumerate([(0, 'T'), (1, 'mk1'), (1, 'mk2'), (1, 'rec'), (0, 'a')])]
+    lines += ['{"ie":0,"sort":0}', '{"ie":1,"const":{"name":1,"us":[]}}', '{"ie":2,"const":{"name":5,"us":[]}}',
+              '{"forallE":{"binderInfo":"default","body":1,"name":0,"type":2},"ie":3}']
+    ctor = {'levelParams': [], 'induct': 1, 'numParams': 0, 'numFields': 0, 'isUnsafe': False}
+    lines.append(json.dumps({'inductive': {
+        'types': [{'name': 1, 'levelParams': [], 'type': 0, 'numParams': 0, 'numIndices': 0, 'all': [1],
+                   'ctors': [2, 3], 'numNested': 0, 'isRec': False, 'isReflexive': False, 'isUnsafe': False}],
+        'ctors': [dict(ctor, name=2, type=1, cidx=0), dict(ctor, name=3, type=mk2_type, cidx=1)],
+        'recs': [{'name': 4, 'levelParams': [], 'type': 0, 'all': [1], 'numParams': 0, 'numIndices': 0,
+                  'numMotives': 1, 'numMinors': 2, 'rules': [], 'k': False, 'isUnsafe': False}]}}))
+    env = attempt(lambda: vx.load_export(export_file(lines)))
+    return [attempt(lambda: vx.digest(env, n)) for n in ('T', 'T.mk1', 'T.rec')]
+
+
+check('digest of every block member covers the whole block', differ(*zip(block_digests(1), block_digests(3))))
+
 NAME_X = '{"in":1,"str":{"pre":0,"str":"x"}}'
 SORT = '{"ie":0,"sort":0}'
 AXIOM_X = '{"axiom":{"name":1,"levelParams":[],"type":0,"isUnsafe":false}}'
