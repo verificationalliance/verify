@@ -1,6 +1,7 @@
 """The command line, run as the workflow runs it: `python3 -I vacheck.pyz ...`, with the zipapp that
 scripts/release.sh builds, on the fixtures, and with the real nanoda_bin of the v4.36.0 toolchain
 (NANODA_BIN overrides where it is)."""
+import glob
 import hashlib
 import json
 import os
@@ -10,9 +11,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+from vacheck.text import log_line  # noqa: E402
 FIXTURES = os.path.join(ROOT, 'tests', 'fixtures')
 NANODA = os.environ.get('NANODA_BIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0/bin/nanoda_bin')
@@ -92,8 +95,10 @@ class Run:
         self.err = proc.stderr.decode('utf-8', errors='replace')
 
     def one_line(self):
-        """The message on stderr is one line, with no `::` that GitHub could read as a workflow command."""
-        ok = self.err.endswith('\n') and self.err.count('\n') == 1 and '::' not in self.err
+        """The message on stderr is one line of printable ASCII, with no `::` or `##` that GitHub's runner
+        could read as a workflow command."""
+        ok = (self.err.endswith('\n') and all(' ' <= c <= '~' for c in self.err[:-1])
+              and '::' not in self.err and '##' not in self.err)
         if not ok:
             print('      stderr: %r' % self.err)
         return ok
@@ -122,6 +127,8 @@ check('toolchain v4.34.0 names the supported versions',
 link = fresh('lean-toolchain')
 os.symlink(write(fresh('lean-toolchain'), 'leanprover/lean4:v4.36.0\n'), link)
 check('toolchain through a symlink rejected', cli('toolchain', link).rejected('symlink'))
+r = cli('toolchain', write(fresh('lean-toolchain'), 'leanprover/lean4:v4.36.0' + ' ' * 1001 + '\n'))
+check('a lean-toolchain over 1024 bytes rejected', r.rejected('larger than 1024 bytes'))
 check('toolchain nightly rejected', cli('toolchain', write(fresh('lean-toolchain'), 'leanprover/lean4:nightly\n'))
       .rejected('v1 supports Lean v4.35.0 or later'))
 
@@ -146,6 +153,8 @@ r = cli('modules', write(fresh('m.json'), manifest(modules=('Good', 'Good.Extra'
 check('modules prints the project, then the modules', r.code == 0 and r.out == 'core\nGood\nGood.Extra\n')
 r = cli('modules', write(fresh('m.json'), manifest(**{'x\n::error::injected': 1})))
 check('a manifest error is one line, with no workflow command', r.rejected('unknown field'))
+r = cli('modules', write(fresh('m.json'), manifest(**{'##[add-mask]x': 1})))
+check('a manifest error has no legacy ##[ workflow command', r.rejected('unknown field'))
 
 
 # analyze
@@ -176,7 +185,7 @@ def reference(case):
 def tree(case, claims, raw=None):
     """A checkout: the fixture's Lake project in `core`, the manifest at the root."""
     root = fresh('repo')
-    shutil.copytree(os.path.join(FIXTURES, case), os.path.join(root, 'core'))
+    shutil.copytree(os.path.join(FIXTURES, case), os.path.join(root, 'core'), ignore=shutil.ignore_patterns('.lake'))
     write(os.path.join(root, '.verificationalliance.json'),
           raw if raw is not None else manifest(modules=(MODULES[case],), claims=claims))
     return root
@@ -210,15 +219,14 @@ check('analyze good writes canonical JSON', good_run.out == canonical(good_res))
 check('analyze good carries the run',
       {k: good_res.get(k) for k in ('repo', 'commit', 'toolchain', 'project', 'kernels')}
       == {'repo': REPO, 'commit': COMMIT, 'toolchain': 'v4.36.0', 'project': 'core', 'kernels': ['lean', 'nanoda']})
-check('the statement of Good.t1 is printed by nanoda',
+check('the statement of Good.t1 is printed by nanoda, without its value',
       t1.get('statement') == 'theorem Good.t1 (n : Nat) :\n'
-      '  Or (Eq (Good.f n) (HAdd.hAdd n (OfNat.ofNat 1))) (Ne (Good.f n) (HAdd.hAdd n (OfNat.ofNat 1))) :=\n'
-      '  _')
+      '  Or (Eq (Good.f n) (HAdd.hAdd n (OfNat.ofNat 1))) (Ne (Good.f n) (HAdd.hAdd n (OfNat.ofNat 1)))')
 check('the definition of Good.f is printed by nanoda',
       t1.get('defs') == [{'name': 'Good.f', 'text': 'def Good.f (n : Nat) : Nat := HAdd.hAdd n (OfNat.ofNat 1)'}])
 check('a name with «» is printed',
       by_theorem.get('Good.«key never leaves»', {}).get('statement')
-      == 'theorem «Good.key never leaves» (n : Nat) : LT.lt n (Good.f n) := _')
+      == 'theorem «Good.key never leaves» (n : Nat) : LT.lt n (Good.f n)')
 check('analyze sorry rejected', analyze('sorry', (('x', 'Sorry.t', 'model'),)).rejected('Sorry.t', 'sorryAx'))
 check('analyze native_decide rejected, by the axiom it adds',
       analyze('native', (('x', 'Native.t', 'model'),)).rejected('Native.t._native.native_decide.ax_1_1'))
@@ -226,6 +234,12 @@ check('analyze an unsupported toolchain rejected',
       analyze('good', good_claims, toolchain='v4.34.0').rejected('v1 supports Lean v4.35.0 or later'))
 check('an analysis error is one line, with no workflow command',
       analyze('good', (('x', 'Good.«::error::x»', 'model'),)).rejected('is not in the export'))
+forged = 'Good.«##[set-output name=result;]{"forged":1}»'
+r = analyze('good', (('x', forged, 'model'),))
+check('an analysis error has no legacy ##[ workflow command', r.rejected('is not in the export'))
+check('an analysis error is escaped once: \\xab for «, not \\\\xab',
+      r.err == log_line('%s is not in the export' % forged) + '\n'
+      and '.\\xab# #[set-output' in r.err and '\\\\' not in r.err)
 moved = tree('good', (('x', 'Good.t1', 'model'),))
 os.makedirs(os.path.join(moved, 'sub'))
 os.rename(os.path.join(moved, '.verificationalliance.json'), os.path.join(moved, 'sub', 'va.json'))
@@ -308,6 +322,45 @@ last = attempt(lambda: json.load(open(SEEN + '.json', encoding='utf-8'))) or {}
 sep2 = last.get('pp_options', {}).get('declar_sep')
 check('the separator is random, new each run',
       all(isinstance(x, str) and re.fullmatch('[0-9a-f]{32}', x) for x in (sep1, sep2)) and sep1 != sep2)
+r = analyze('good', (('x', 'Good.t1', 'model'),), nanoda=fake_nanoda(
+    "sys.stderr.write('##[add-mask]x\\n::error::y\\n'); sys.exit(1)"))
+check('a nanoda_bin error is one line, with no workflow command', r.rejected('nanoda_bin could not print'))
+r = analyze('good', (('x', 'Good.t1', 'model'),), nanoda=fake_nanoda(
+    "sys.stdout.write(''.join('theorem %s : True := trivial' % n + sep for n in names))"))
+check('a statement printed with its proof rejected', r.rejected('Good.t1'))
+sleeper = fake_nanoda('import time\ntime.sleep(10)\n')
+
+
+def timed_out():
+    """The printer's message, and how long it took, with a timeout of 1 s on a nanoda_bin that sleeps 10 s."""
+    vm.NANODA_TIMEOUT, start = 1, time.monotonic()
+    try:
+        vm.nanoda_printer(sleeper, os.path.join(FIXTURES, 'good.ndjson'))(['Good.t1'])
+    except vm.AnalysisError as e:
+        return str(e), time.monotonic() - start
+    finally:
+        vm.NANODA_TIMEOUT = 900
+    return None, None
+
+
+msg, took = attempt(timed_out) or (None, None)
+check('nanoda_bin is stopped at the timeout, 900 s', vm is not None and vm.NANODA_TIMEOUT == 900
+      and msg is not None and 'did not finish' in msg and took < 5)
+
+
+def invisible(path):
+    """The lines of a source file that hold a control, format or line separator character."""
+    with open(path, encoding='utf-8') as f:
+        return [i for i, line in enumerate(f, 1)
+                if any(unicodedata.category(c) in ('Cc', 'Cf', 'Zl', 'Zp') for c in line.rstrip('\n'))]
+
+
+sources = sorted(glob.glob(os.path.join(ROOT, 'vacheck', '*.py'))) + [
+    os.path.abspath(__file__), os.path.join(ROOT, 'scripts', 'release.sh')]
+found = {os.path.relpath(p, ROOT): invisible(p) for p in sources}
+check('invisible characters are written as escapes in the sources', len(found) > 5 and not any(found.values()))
+if any(found.values()):
+    print('      %s' % {k: v for k, v in found.items() if v})
 
 # validate result.json
 good_file = write(fresh('result.json'), good_run.out)
@@ -324,7 +377,7 @@ check('validate rejects a file over 1 MB',
       cli('validate', write(fresh('result.json'), good_run.out + ' ' * (1024 * 1024))).rejected())
 
 # Misuse exits 2, with one line.
-for args in ((), ('nope',), ('toolchain',), ('analyze', '--export', 'x')):
+for args in ((), ('nope',), ('##[add-mask]x::',), ('toolchain',), ('analyze', '--export', 'x')):
     r = cli(*args)
     check('misuse %r exits 2' % (args,), os.path.isfile(PYZ) and r.code == 2 and r.one_line())
 

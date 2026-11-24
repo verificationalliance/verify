@@ -8,15 +8,15 @@
                                      prints result.json
     validate <result.json>           prints the result's canonical JSON
 
-Exit codes: 0 ok, 1 rejected, 2 misuse. Every message is one line on stderr, for the developer's log:
-no control or bidi characters, and no `::`, so that no text from the repository can become a GitHub
-workflow command. JSON goes to stdout canonical: sorted keys, no spaces, UTF-8, no final newline.
+Exit codes: 0 ok, 1 rejected, 2 misuse. Every message is one line on stderr, for the developer's log,
+made by text.log_line, so that no text from the repository or the export can become a GitHub workflow
+command. JSON goes to stdout canonical: sorted keys, no spaces, UTF-8, no final newline. Statements
+are the declaration and its type, without the value.
 """
 import argparse
 import errno
 import json
 import os
-import re
 import secrets
 import stat
 import subprocess
@@ -28,9 +28,11 @@ from .analyze import AnalysisError, analyze
 from .export import ExportError, load_export
 from .manifest import MAX_BYTES as MANIFEST_BYTES, ManifestError, parse_manifest
 from .result import ALLOWED_AXIOMS, MAX_BYTES as RESULT_BYTES, ResultError, validate_result
+from .text import log_line
 
 LEAN = 'leanprover/lean4:'
-_UNSAFE = re.compile('[\u0000-\u001f\u007f-\u009f‎‏  ‪-‮⁦-⁩]+')
+MAX_TOOLCHAIN = 1024
+NANODA_TIMEOUT = 900  # seconds
 
 
 class Rejected(Exception):
@@ -39,13 +41,6 @@ class Rejected(Exception):
 
 class Misuse(Exception):
     """Exit 2 with this message."""
-
-
-def _one_line(msg):
-    line = _UNSAFE.sub(' ', str(msg)).strip()
-    while '::' in line:
-        line = line.replace('::', ': :')
-    return line
 
 
 def _canonical(obj):
@@ -96,7 +91,10 @@ def _export(path, what):
 
 
 def toolchain(args):
-    text = _read(args.file, 1024, 'lean-toolchain').decode('utf-8', errors='replace').strip()
+    data = _read(args.file, MAX_TOOLCHAIN, 'lean-toolchain')
+    if len(data) > MAX_TOOLCHAIN:
+        raise Rejected('lean-toolchain is larger than %d bytes' % MAX_TOOLCHAIN)
+    text = data.decode('utf-8', errors='replace').strip()
     found = _toolchain.lookup(text[len(LEAN):] if text.startswith(LEAN) else text)
     if found is None:
         raise Rejected(_unsupported())
@@ -161,6 +159,18 @@ def _is_printed(text, name):
     return False
 
 
+def _without_value(text):
+    """A theorem as nanoda_bin prints it without proofs, `<header> : <type> :=` then `_` (after a space or
+    on the next line), as its header and type only; None if it does not end that way."""
+    head = text.rstrip(' \n')
+    if not head.endswith('_'):
+        return None
+    head = head[:-1].rstrip(' \n')
+    if not head.endswith(':='):
+        return None
+    return head[:-2].rstrip(' \n')
+
+
 def nanoda_printer(nanoda, export_path):
     """The printer for analyze: nanoda_bin's pretty-printer on the export, one call for all the names.
 
@@ -188,7 +198,10 @@ def nanoda_printer(nanoda, export_path):
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(config, f)
-            proc = subprocess.run([nanoda, path], stdin=subprocess.DEVNULL, capture_output=True)
+            proc = subprocess.run([nanoda, path], stdin=subprocess.DEVNULL, capture_output=True,
+                                  timeout=NANODA_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise AnalysisError('nanoda_bin did not finish printing in %d seconds' % NANODA_TIMEOUT) from None
         except OSError as e:
             raise AnalysisError('cannot run nanoda_bin: %s' % (e.strerror or e)) from None
         finally:
@@ -201,10 +214,16 @@ def nanoda_printer(nanoda, export_path):
         if (len(parts) <= len(names) or parts[-1] != '' or len(extra) > len(ALLOWED_AXIOMS)
                 or not all(e.startswith('axiom ') for e in extra)):
             raise AnalysisError('nanoda_bin did not print every declaration')
+        printed = {}
         for name, nano, text in zip(names, wanted, texts):
             if not _is_printed(text, nano):
                 raise AnalysisError('nanoda_bin did not print %s' % name)
-        return dict(zip(names, texts))
+            if text.startswith('theorem '):
+                text = _without_value(text)
+                if text is None:
+                    raise AnalysisError('nanoda_bin printed the proof of %s' % name)
+            printed[name] = text
+        return printed
 
     return printer
 
@@ -219,11 +238,8 @@ def analyze_command(args):
     manifest_path = os.path.relpath(os.path.abspath(args.manifest), source).replace(os.sep, '/')
     kernels = [k for k in args.kernels.split(',') if k]
     printer = nanoda_printer(args.nanoda, os.path.abspath(args.export))
-    try:
-        result = analyze(export, reference, manifest, source, args.repo, args.commit, args.toolchain,
-                         kernels, printer, manifest_path=manifest_path)
-    except AnalysisError as e:
-        raise Rejected(e) from None
+    result = analyze(export, reference, manifest, source, args.repo, args.commit, args.toolchain,
+                     kernels, printer, manifest_path=manifest_path)
     _out(_canonical(result))
 
 
@@ -284,13 +300,15 @@ def run(argv=None):
         args = _parser().parse_args(argv)
         args.run(args)
         return 0
+    except AnalysisError as e:  # its message has been through log_line already
+        line, code = str(e), 1
     except Misuse as e:
-        msg, code = e, 2
+        line, code = log_line(e), 2
     except Rejected as e:
-        msg, code = e, 1
+        line, code = log_line(e), 1
     except Exception as e:  # a failure nothing above foresaw: one line too
-        msg, code = 'vacheck failed: %s: %s' % (type(e).__name__, e), 1
-    sys.stderr.buffer.write((_one_line(msg) + '\n').encode('utf-8', errors='replace'))
+        line, code = log_line('vacheck failed: %s: %s' % (type(e).__name__, e)), 1
+    sys.stderr.buffer.write((line + '\n').encode('utf-8', errors='replace'))
     sys.stderr.buffer.flush()
     return code
 
