@@ -18,6 +18,8 @@
 #   export or names from it runs in a bwrap sandbox, as `lake check` runs its kernels: no network,
 #   no environment, and it reads none of the invoking user's files (nor /run or /var, where the
 #   docker socket is); only its inputs are bound back, read-only. A step tests that on the runner.
+#   Its steps are this repository's composite action .github/actions/check, at the commit the job
+#   pins, and our re-check of every signed result runs the same action.
 # - `sign` runs no Lean and never sees the export. It receives result.json as a job output, never
 #   as an artifact (any job in the run, `build` included, can upload an artifact), validates it,
 #   checks that it is for this repository and commit, and has GitHub sign it.
@@ -40,6 +42,10 @@ on:
         type: string
         required: false
         default: .verificationalliance.json
+    outputs:
+      result:
+        description: The base64 of result.json, as job check made it for job sign.
+        value: ${{ jobs.check.outputs.result }}
 
 permissions:
   contents: read
@@ -65,8 +71,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - &checkout
-        name: Check out the commit
+      - name: Check out the commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -255,8 +260,7 @@ jobs:
               f.write(''.join('%s\t%s\n' % mp for mp in modules))
           EOF
 
-      - &read-manifest
-        name: Read the manifest
+      - name: Read the manifest
         id: manifest
         run: |
           va="$RUNNER_TEMP/va"
@@ -278,8 +282,7 @@ jobs:
           # and GitHub keeps two of the same name when two calls upload one at the same time.
           echo "export=export-$(printf '%s' "$MANIFEST" | sha256sum | cut -c 1-16)" >> "$GITHUB_OUTPUT"
 
-      - &install-toolchain
-        name: Install the toolchain
+      - name: Install the toolchain
         run: |
           read -r url sha < "$RUNNER_TEMP/va/toolchain"
           curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" "$url"
@@ -329,14 +332,19 @@ jobs:
           fi
           echo "The export is $size bytes."
 
+      # Kept 7 days: our re-check downloads it from this run, and may come after an outage.
       - name: Upload the export
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.manifest.outputs.export }}
           path: ${{ runner.temp }}/out/export.ndjson
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error
 
+  # The check runs as one step: the composite action .github/actions/check, pinned by commit, as
+  # every action is. It is named in full, not as ./.github/actions/check: a called workflow would
+  # look for ./ in its caller's checkout. scripts/release.sh refuses a release in which that
+  # commit's action is not the release's own. The steps and their comments are in the action.
   check:
     name: check
     needs: build
@@ -347,272 +355,11 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      # GitHub's standard runners for ubuntu-24.04: named "GitHub Actions <number>", in runner group
-      # "GitHub Actions", on GitHub's own image. A larger runner is named after its runner, and may
-      # run an image its organisation made.
-      - &standard-runner
-        name: Require a standard GitHub-hosted runner
-        run: |
-          os=$(. /etc/os-release && echo "$ID $VERSION_ID")
-          if [[ ${RUNNER_ENVIRONMENT:-} != github-hosted || ${ImageOS:-} != ubuntu24 || $os != "ubuntu 24.04" ]] \
-              || ! [[ ${ImageVersion:-} =~ ^[0-9]{8}\.[0-9]+(\.[0-9]+)?$ && ${RUNNER_NAME:-} =~ ^GitHub\ Actions\ [0-9]+$ ]]; then
-            echo "::error::This job runs only on a standard GitHub-hosted ubuntu-24.04 runner, not a larger or self-hosted one."
-            exit 1
-          fi
-          echo "Runner $RUNNER_NAME, image $ImageOS $ImageVersion, $os."
-
-      # The checkout is data: vacheck reads the manifest, the lean-toolchain and the Lake files, and
-      # hashes every file of the checkout but .git. Nothing in it is run, built or loaded.
-      - *checkout
-
-      - name: Install bubblewrap
-        run: |
-          # `lake check` runs the kernels in a bwrap sandbox without network, and so does the
-          # sandbox script for nanoda and the reference; both need unprivileged user namespaces.
-          sudo apt-get update -q -o Acquire::Retries=3
-          sudo apt-get install -y -q -o Acquire::Retries=3 bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          bwrap --ro-bind / / --unshare-all true
-
-      - *get-checker
-
-      - name: Test the sandbox, then stop docker
-        run: |
-          va="$RUNNER_TEMP/va"
-          # On this runner, before anything hostile is read: the sandbox must hide the docker socket
-          # (root on the host, and the runner user is in group docker), the step's command files,
-          # the job's folders and the runner's environment, and must have no network.
-          if [[ -S /run/docker.sock ]]; then
-            echo "This runner has /run/docker.sock, which the sandbox must hide."
-          fi
-          # From /tmp, so that nothing of $RUNNER_TEMP is bound into the sandbox for the test.
-          probe=$(mktemp -d)
-          cp "$va/probe.sh" "$probe/probe.sh"
-          echo probe > "$probe/given"
-          if ! "$va/sandbox" --ro "$probe/given" --ro "$probe/probe.sh" -- /bin/bash "$probe/probe.sh" "$probe/given" \
-              /run/docker.sock /var/run/docker.sock "$GITHUB_OUTPUT" "$GITHUB_ENV" "$GITHUB_PATH" \
-              "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP" "$va/vacheck.pyz" "$GITHUB_WORKSPACE" "$HOME"; then
-            echo "::error::The sandbox for nanoda_bin and the reference program does not isolate them."
-            exit 1
-          fi
-          # And no docker at all from here on.
-          sudo systemctl stop docker.socket docker.service
-          if systemctl is-active --quiet docker.socket || systemctl is-active --quiet docker.service; then
-            echo "::error::Docker is still running."
-            exit 1
-          fi
-          echo "Docker is stopped."
-
-      # The same reading as in build, but here: nothing build says is trusted.
-      - *read-manifest
-
-      - *install-toolchain
-
-      - name: Download the export
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ${{ steps.manifest.outputs.export }}
-          path: ${{ runner.temp }}/export
-
-      - name: Replay the export through the kernels
-        run: |
-          va="$RUNNER_TEMP/va"
-          lake="$RUNNER_TEMP/lean/bin/lake"
-          export_file="$RUNNER_TEMP/export/export.ndjson"
-          if [[ ! -f "$export_file" || -L "$export_file" ]] || (( $(stat -c %s "$export_file") > MAX_EXPORT )); then
-            echo "::error::The export is missing or larger than 2 GiB."
-            exit 1
-          fi
-          # An empty project of ours: `lake check` runs in it, so nothing of the repository's Lake
-          # configuration is read.
-          work=$(mktemp -d)
-          echo "$work" > "$va/work"
-          printf 'name = "vacheck_empty"\ndefaultTargets = ["Empty"]\n\n[[lean_lib]]\nname = "Empty"\n' \
-            > "$work/lakefile.toml"
-          cd "$work"
-          "$lake" update 2>&1 | python3 -I "$va/say.py" "$va/vacheck.pyz"
-          if ! "$lake" check --from-export "$export_file" --paranoid 2>&1 | tee "$va/check.log" \
-              | python3 -I "$va/say.py" "$va/vacheck.pyz"; then
-            echo "::error::The kernels rejected the export, or it uses an axiom other than propext, Quot.sound and Classical.choice."
-            exit 1
-          fi
-          python3 -I "$va/kernels.py" "$va/check.log" > "$va/kernels"
-          echo "Kernels that accepted the export: $(cat "$va/kernels")"
-
-      - name: Export the references from the toolchain's libraries
-        run: |
-          # Every declaration in the export whose name a library of the toolchain declares, exported
-          # from that library with the toolchain's own leanexport code, with what each depends on.
-          # vacheck analyze compares them, so a project cannot redefine Eq, Nat or another name of
-          # the toolchain's. The libraries:
-          # - @base: every module below Init, Std, Lean and Lake, loaded together and always compared;
-          # - each other top-level .olean (LeanChecker, LeanExport, LeanIR, Leanc, LakeMain; each
-          #   defines `main`) with the modules below it, loaded alone, for the names @base lacks, and
-          #   compared only if the project's .lean files import it. A name of a library the project
-          #   does not import is its own, shown with its definition: LeanChecker declares a
-          #   top-level `println`, and so may a project.
-          # A library that cannot be loaded fails the check, and so does a shipped module that no
-          # library loaded imports, if it declares constants.
-          # The names go through files, as data: the leanexport command line can neither take this
-          # many nor write names such as _private.Init.Prelude.0.x.
-          va="$RUNNER_TEMP/va"
-          lean="$RUNNER_TEMP/lean"
-          work=$(cat "$va/work")
-          export_file="$RUNNER_TEMP/export/export.ndjson"
-          python3 -I "$va/vacheck.pyz" names "$export_file" > "$work/names.jsonl"
-          python3 -I "$va/vacheck.pyz" imports --manifest "$GITHUB_WORKSPACE/$MANIFEST" \
-            --source "$GITHUB_WORKSPACE" > "$work/imports"
-          python3 -I "$va/libraries.py" "$lean/lib/lean" "$work/libs"
-          cat > "$work/Reference.lean" <<'EOF'
-          import Lean.Data.Json.Parser
-          import LeanExport.Basic
-
-          open Lean
-
-          /-- A name from the JSON array of its components: strings for `Name.str`, numbers for `Name.num`. -/
-          def nameOf (j : Json) : Except String Name := do
-            let comps ← j.getArr?
-            if comps.isEmpty then throw "a name without components"
-            comps.foldlM (init := .anonymous) fun n c =>
-              match c with
-              | .str s => pure (n.str s)
-              | .num k =>
-                if k.exponent == 0 && k.mantissa ≥ 0 then pure (n.num k.mantissa.toNat)
-                else throw "a name component that is not a natural number"
-              | _ => throw "a name component that is neither a string nor a number"
-
-          /-- reference NAMES REST CLOSURE MODULES: imports the modules listed in MODULES, one per
-          line; exports to stdout every declaration named in NAMES that they have; writes the lines of
-          NAMES that they lack to REST, and the modules of their import closure to CLOSURE.
-          reference --constants OLEAN...: the number of constants each .olean file declares. -/
-          def main (args : List String) : IO UInt32 := do
-            match args with
-            | "--constants" :: files =>
-              for f in files do
-                let (data, _) ← readModuleData f
-                IO.println s!"{data.constNames.size}"
-              return 0
-            | [namesIn, namesOut, closureOut, modulesIn] =>
-              let modules := (← IO.FS.lines modulesIn).filter (!·.isEmpty)
-              if modules.isEmpty then throw <| IO.userError "no modules to import"
-              initSearchPath (← findSysroot)
-              let env ← importModules (modules.map fun m => { module := m.toName }) {}
-              IO.FS.writeFile closureOut (String.join (env.header.moduleNames.toList.map (toString · ++ "\n")))
-              let mut found := #[]
-              let mut rest := ""
-              for line in ← IO.FS.lines namesIn do
-                match Json.parse line >>= nameOf with
-                | .ok n => if env.contains n then found := found.push n else rest := rest ++ line ++ "\n"
-                | .error e => throw <| IO.userError s!"the names file: {e}"
-              IO.FS.writeFile namesOut rest
-              LeanExport.dumpEnv env found.toList ["--export-unsafe"]
-              return 0
-            | _ => throw <| IO.userError "usage: reference <names> <rest> <closure> <modules>"
-          EOF
-          cd "$work"
-          "$lean/bin/lean" -c reference.c Reference.lean
-          "$lean/bin/leanc" -o reference reference.c -lLeanExport
-          mkdir refs
-          # reference NAMES REST LIBRARY: the reference program for one library, in the sandbox. It
-          # writes refs/LIBRARY.ndjson and libs/LIBRARY.closure. The paths are absolute, because the
-          # sandbox has only them, not the folder they are in.
-          reference() {
-            local names=$1 rest=$2 library=$3
-            : > "$rest"
-            : > "$work/libs/$library.closure"
-            if ! "$va/sandbox" --ro "$lean" --ro "$work/reference" --ro "$names" --ro "$work/libs/$library.modules" \
-                --rw "$rest" --rw "$work/libs/$library.closure" \
-                --setenv LEAN_SYSROOT "$lean" --setenv LEAN_ABORT_ON_PANIC 1 \
-                -- "$work/reference" "$names" "$rest" "$work/libs/$library.closure" "$work/libs/$library.modules" \
-                > "$work/refs/$library.ndjson" 2> reference.log; then
-              python3 -I "$va/say.py" "$va/vacheck.pyz" < reference.log
-              echo "::error::The toolchain's reference could not be exported from $library."
-              exit 1
-            fi
-          }
-          # @base cannot be the name of a library: a module name cannot start with @.
-          reference "$work/names.jsonl" "$work/rest.jsonl" @base
-          echo "$work/refs/@base.ndjson" > "$va/references"
-          # Every executable's library defines its own `main`, so a project's `main` is left to be
-          # shown as the project's own, with its definition, rather than compared with one of them.
-          grep -vxF '["main"]' rest.jsonl > lookup.jsonl || [[ $? -eq 1 ]]
-          libraries=() compared=()
-          while read -r library; do
-            reference "$work/lookup.jsonl" "$work/unused.jsonl" "$library"
-            libraries+=("$library")
-            if grep -qxF "$library" imports; then
-              echo "$work/refs/$library.ndjson" >> "$va/references"
-              compared+=("$library")
-            elif (( $? != 1 )); then
-              echo "::error::The project's imports could not be read."
-              exit 1
-            fi
-          done < libs/@libraries
-          if (( ${#libraries[@]} == 0 )); then
-            echo "::error::The toolchain has no library besides Init, Std, Lean and Lake."
-            exit 1
-          fi
-          # Every shipped module is in the import closure of a library loaded here, or its .olean
-          # declares no constants: otherwise a project could import it and none of its names would
-          # be compared. These are the toolchain's own files, read without a sandbox.
-          python3 -I "$va/libraries.py" --uncovered "$work/libs" > uncovered.tsv
-          if [[ -s uncovered.tsv ]]; then
-            mapfile -t files < <(cut -f 2 uncovered.tsv)
-            "$work/reference" --constants "${files[@]}" > constants
-            declaring=$(paste uncovered.tsv constants | awk -F '\t' '$3 != 0 { print $1 }' | sort -u | paste -sd ' ')
-            if [[ -n $declaring ]]; then
-              echo "::error::The toolchain ships modules that declare constants and that no library loaded here imports: $declaring"
-              exit 1
-            fi
-            echo "Shipped modules that no library imports, all declaring no constants: $(cut -f 1 uncovered.tsv | sort -u | paste -sd ' ')"
-          fi
-          echo "The export has $(wc -l < names.jsonl) declarations; $(wc -l < rest.jsonl) are not in Init, Std, Lean or Lake."
-          echo "Libraries loaded besides @base: ${libraries[*]}; compared, because the project imports them: ${compared[*]:-none}."
-          for f in refs/*.ndjson; do echo "Reference $(basename "$f" .ndjson): $(stat -c %s "$f") bytes."; done
-
-      - name: Analyze
-        run: |
-          va="$RUNNER_TEMP/va"
-          lean="$RUNNER_TEMP/lean"
-          export_file="$RUNNER_TEMP/export/export.ndjson"
-          read -r url _ < "$va/toolchain"
-          version=${url%/*}
-          version=${version##*/}
-          # vacheck runs nanoda_bin to print the statements from the export: in the sandbox, with
-          # the export and the configuration vacheck writes for it.
-          cat > "$va/nanoda" <<EOF
-          #!/bin/bash
-          exec "$va/sandbox" --ro "\$1" --ro "$export_file" --ro "$lean/bin/nanoda_bin" -- "$lean/bin/nanoda_bin" "\$1"
-          EOF
-          chmod +x "$va/nanoda"
-          references=()
-          while read -r f; do references+=(--reference "$f"); done < "$va/references"
-          if ! python3 -I "$va/vacheck.pyz" analyze \
-            --export "$export_file" \
-            "${references[@]}" \
-            --manifest "$GITHUB_WORKSPACE/$MANIFEST" \
-            --source "$GITHUB_WORKSPACE" \
-            --repo "github.com/$GITHUB_REPOSITORY" \
-            --commit "$GITHUB_SHA" \
-            --toolchain "$version" \
-            --kernels "$(cat "$va/kernels")" \
-            --nanoda "$va/nanoda" \
-            > "$va/result.json"; then
-            echo "::error::The check failed: the line above says why."
-            exit 1
-          fi
-          echo "The check passed: result.json is $(stat -c %s "$va/result.json") bytes, sha256 $(sha256sum < "$va/result.json" | cut -d ' ' -f 1)."
-
-      - name: Hand the result to sign
+      - name: Check the export
         id: result
-        run: |
-          va="$RUNNER_TEMP/va"
-          base64 -w0 "$va/result.json" > "$va/result.b64"
-          if (( $(stat -c %s "$va/result.b64") > MAX_RESULT_B64 )); then
-            echo "::error::result.json is larger than 96,000 bytes, too large to pass to job sign."
-            exit 1
-          fi
-          { printf 'result='; cat "$va/result.b64"; echo; } >> "$GITHUB_OUTPUT"
+        uses: verificationalliance/verify/.github/actions/check@3762b051c259ce791cf76af48c20ae3f1bbd5476 # workflow-7
+        with:
+          manifest: ${{ inputs.manifest }}
 
   sign:
     name: sign
@@ -624,7 +371,18 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - *standard-runner
+      # GitHub's standard runners for ubuntu-24.04: named "GitHub Actions <number>", in runner group
+      # "GitHub Actions", on GitHub's own image. A larger runner is named after its runner, and may
+      # run an image its organisation made.
+      - name: Require a standard GitHub-hosted runner
+        run: |
+          os=$(. /etc/os-release && echo "$ID $VERSION_ID")
+          if [[ ${RUNNER_ENVIRONMENT:-} != github-hosted || ${ImageOS:-} != ubuntu24 || $os != "ubuntu 24.04" ]] \
+              || ! [[ ${ImageVersion:-} =~ ^[0-9]{8}\.[0-9]+(\.[0-9]+)?$ && ${RUNNER_NAME:-} =~ ^GitHub\ Actions\ [0-9]+$ ]]; then
+            echo "::error::This job runs only on a standard GitHub-hosted ubuntu-24.04 runner, not a larger or self-hosted one."
+            exit 1
+          fi
+          echo "Runner $RUNNER_NAME, image $ImageOS $ImageVersion, $os."
 
       - *get-checker
 

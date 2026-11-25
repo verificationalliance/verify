@@ -31,6 +31,9 @@ jobs:
           rm "$RUNNER_TEMP/lean.tar.zst"
           echo "NANODA_BIN=$RUNNER_TEMP/lean/bin/nanoda_bin" >> "$GITHUB_ENV"
 
+      - name: test_workflows
+        run: python3 -I tests/test_workflows.py
+
       - name: test_vacheck
         run: python3 -I tests/test_vacheck.py
 
