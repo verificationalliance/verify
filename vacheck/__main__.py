@@ -15,8 +15,9 @@
                                      and each name is the JSON array of its components, as names
                                      writes it
     analyze --export F --reference F [--reference F ...] --manifest F --source D --repo R --commit C
-            --toolchain V --kernels K,K --nanoda PATH
-                                     prints result.json
+            --toolchain V --kernels K,K --nanoda PATH --abstracted F
+                                     prints result.json; --abstracted is what the sanity helper
+                                     printed for sanity-targets' pairs
     validate <result.json>           prints the result's canonical JSON
 
 Exit codes: 0 ok, 1 rejected, 2 misuse. Every message is one line on stderr, for the developer's log,
@@ -46,6 +47,7 @@ LEAN = 'leanprover/lean4:'
 MAX_TOOLCHAIN = 1024
 MAX_READ = 1024 * 1024  # the largest result.json file validate reads; validate_result caps the JSON
 NANODA_TIMEOUT = 900  # seconds
+MAX_VERDICTS = 64 * 1024  # the sanity helper prints one short line per pair, and there are at most 400
 
 
 class Rejected(Exception):
@@ -285,9 +287,13 @@ def analyze_command(args):
     source = os.path.abspath(args.source)
     manifest_path = os.path.relpath(os.path.abspath(args.manifest), source).replace(os.sep, '/')
     kernels = [k for k in args.kernels.split(',') if k]
+    data = _read(args.abstracted, MAX_VERDICTS, "the sanity helper's verdicts")
+    if len(data) > MAX_VERDICTS:
+        raise Rejected("the sanity helper's verdicts are larger than %d KiB" % (MAX_VERDICTS // 1024))
     printer = nanoda_printer(args.nanoda, os.path.abspath(args.export))
     result = analyze(export, references, manifest, source, args.repo, args.commit, args.toolchain,
-                     kernels, printer, manifest_path=manifest_path)
+                     kernels, printer, manifest_path=manifest_path,
+                     verdicts=data.decode('utf-8', errors='replace'))
     _out(_canonical(result))
 
 
@@ -336,7 +342,7 @@ def _parser():
         p.add_argument('file', metavar=arg)
         p.set_defaults(run=fn)
     p = commands.add_parser('analyze')
-    for flag in ('export', 'manifest', 'source', 'repo', 'commit', 'toolchain', 'kernels', 'nanoda'):
+    for flag in ('export', 'manifest', 'source', 'repo', 'commit', 'toolchain', 'kernels', 'nanoda', 'abstracted'):
         p.add_argument('--' + flag, required=True)
     p.add_argument('--reference', required=True, action='append')
     p.set_defaults(run=analyze_command)

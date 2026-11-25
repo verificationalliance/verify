@@ -3,7 +3,9 @@ import json
 import re
 import unicodedata
 
-SCHEMA = 'https://verificationalliance.org/attestations/proof-check/v1'
+from .sanity import CHECKS, MAX_NAME, MAX_WARNINGS
+
+SCHEMA = 'https://verificationalliance.org/attestations/proof-check/v2'
 ALLOWED_AXIOMS = frozenset({'propext', 'Quot.sound', 'Classical.choice'})
 # The most the workflow can carry from job check to job sign, as canonical JSON (sorted keys, no
 # spaces, UTF-8): job sign reads it from an environment variable, which Linux caps at 128 KiB, in
@@ -78,7 +80,7 @@ def _path(v, what):
 
 
 def _claim(c):
-    _keys(c, ('says', 'theorem', 'about', 'statement', 'defs', 'axioms', 'source'), 'claim')
+    _keys(c, ('says', 'theorem', 'about', 'statement', 'defs', 'axioms', 'source', 'warnings', 'template'), 'claim')
     _str(c['says'], 'says', 200)
     _str(c['theorem'], 'theorem')
     if c['about'] not in ('code', 'model'):
@@ -95,6 +97,41 @@ def _claim(c):
         if a not in ALLOWED_AXIOMS:
             _fail('axiom not allowed')
     _source(c['source'], 'source')
+    _warnings(c['warnings'])
+    if c['template'] is not None:  # claim templates come in a later version
+        _fail('template must be null')
+
+
+def _warnings(ws):
+    """A claim's warnings: 0 to MAX_WARNINGS {check, name, arg}, in the order of CHECKS. A definition's
+    name (holds-for-any, always-true, ignores-argument) is a string as long as defs allows; a binder's
+    (an unused assumption's name, an ignored argument) is a string of at most MAX_NAME characters, or
+    null when the report does not show it; no-project-definition names nothing."""
+    last = 0
+    for w in _list(ws, 'warnings', 0, MAX_WARNINGS):
+        _keys(w, ('check', 'name', 'arg'), 'warning')
+        check = w['check']
+        if not isinstance(check, str) or check not in CHECKS:
+            _fail('unknown warning check')
+        if CHECKS.index(check) < last:
+            _fail('warnings out of order')
+        last = CHECKS.index(check)
+        if check == 'no-project-definition':
+            if w['name'] is not None:
+                _fail('no-project-definition names nothing')
+        elif check == 'unused-assumption':
+            _binder_name(w['name'], 'warning name')
+        else:
+            _str(w['name'], 'warning name')
+        if check == 'ignores-argument':
+            _binder_name(w['arg'], 'warning arg')
+        elif w['arg'] is not None:
+            _fail('only ignores-argument has an arg')
+
+
+def _binder_name(v, what):
+    if v is not None:
+        _str(v, what, MAX_NAME)
 
 
 def _source(src, what):

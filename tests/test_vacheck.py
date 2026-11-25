@@ -90,7 +90,7 @@ res = {
                 'defs': [{'name': 'OSVA.affectedIn', 'text': 'def', 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 40},
                           'term': 'def OSVA.affectedIn :=\n  x'}],
                 'axioms': ['propext'],
-                'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 56}}],
+                'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 56}, 'warnings': [], 'template': None}],
     'evidence': {'ships': ['OSVACore'], 'replaced': [{'path': 'p', 'line': 3, 'text': '@[extern "x"]'}]},
     'kernels': ['lean', 'nanoda', 'lean4lean'],
 }
@@ -171,6 +171,52 @@ check('result non-object rejected', good)
 check('deeply nested manifest raises ManifestError', man_rejected(b'[' * 20000))
 check('lone surrogate in result raises ResultError',
       result_rejected(lambda r: r['claims'][0].update(statement='\ud800')))
+
+# Result v2: each claim's warnings, {check, name, arg}, in the order of the checks, and a template,
+# null until claim templates exist. A definition's name is as long as defs allows; a binder's, at most 200.
+EVERY = [{'check': 'holds-for-any', 'name': 'OSVA.affectedIn', 'arg': None},
+         {'check': 'always-true', 'name': 'OSVA.affectedIn', 'arg': None},
+         {'check': 'ignores-argument', 'name': 'OSVA.affectedIn', 'arg': 'v'},
+         {'check': 'ignores-argument', 'name': 'OSVA.affectedIn', 'arg': None},
+         {'check': 'unused-assumption', 'name': 'h', 'arg': None},
+         {'check': 'unused-assumption', 'name': None, 'arg': None}]
+NO_DEF = {'check': 'no-project-definition', 'name': None, 'arg': None}
+H_W = {'check': 'unused-assumption', 'name': 'h', 'arg': None}
+
+
+def warned(*ws):
+    return lambda r: r['claims'][0].update(warnings=list(ws))
+
+
+check('result v2: the schema', SCHEMA == 'https://verificationalliance.org/attestations/proof-check/v2')
+check('result v2: every kind of warning accepted',
+      not result_rejected(warned(*EVERY)) and not result_rejected(warned(NO_DEF)) and not result_rejected(warned()))
+check('result v2: a claim without warnings rejected', result_rejected(lambda r: r['claims'][0].pop('warnings')))
+check('result v2: a claim without template rejected', result_rejected(lambda r: r['claims'][0].pop('template')))
+check('result v2: a template rejected in 2.0.0',
+      result_rejected(lambda r: r['claims'][0].update(template={'id': 'x/1', 'fills': {}})))
+check('result v2: an unknown check rejected', result_rejected(warned(dict(H_W, check='maybe'))))
+check('result v2: 11 warnings rejected, and 10 accepted',
+      result_rejected(warned(*[H_W] * 11)) and not result_rejected(warned(*[H_W] * 10)))
+check('result v2: holds-for-any without a name rejected', result_rejected(warned(dict(EVERY[0], name=None))))
+check('result v2: no-project-definition with a name rejected', result_rejected(warned(dict(NO_DEF, name='D'))))
+check('result v2: arg on unused-assumption rejected', result_rejected(warned(dict(H_W, arg='x'))))
+check('result v2: arg on holds-for-any rejected', result_rejected(warned(dict(EVERY[0], arg='x'))))
+check('result v2: warnings out of order rejected', result_rejected(warned(EVERY[1], EVERY[0])))
+check('result v2: a warning name with U+202E rejected',
+      result_rejected(warned(dict(H_W, name='a\u202eb'))) and result_rejected(warned(dict(EVERY[2], arg='a\u202eb')))
+      and result_rejected(warned(dict(EVERY[0], name='D\u202e'))))
+check('result v2: a warning with another key, or not an object, rejected',
+      result_rejected(warned(dict(H_W, extra=1)))
+      and result_rejected(warned({'check': 'unused-assumption', 'name': 'h'}))
+      and result_rejected(warned('unused-assumption'))
+      and result_rejected(lambda r: r['claims'][0].update(warnings={})))
+check('result v2: a binder name over 200 characters rejected; a definition name of any length accepted',
+      result_rejected(warned(dict(H_W, name='a' * 201))) and result_rejected(warned(dict(EVERY[2], arg='a' * 201)))
+      and not result_rejected(warned(dict(H_W, name='a' * 200), dict(H_W, name=None)))
+      and not result_rejected(warned(dict(EVERY[0], name='D.' + 'a' * 300))))
+check('result v2: a name that is not a string rejected',
+      result_rejected(warned(dict(H_W, name=7))) and result_rejected(warned(dict(EVERY[0], name=['D']))))
 
 # What a report cannot show is rejected in every text field the result publishes, so the checker
 # and the server agree: control and format characters (zero-width, bidi, soft hyphen, BOM, tab),
@@ -814,6 +860,7 @@ check('sanity: binder walks past their budget give no binder warning, and keep t
       and attempt(lambda: got('big', {'Q'}, shapes, ['Q'])) == [('holds-for-any', 'Q', None)])
 
 
+
 def hostile(d, m, in_proof):
     """D binders around a term of M nodes, each under up to M binders: L(0) is a bound variable none of
     them binds, and L(k) is ∀ (_ : L(k-1)), L(k-1). The theorem h is ∀ x0 … x(D-1), L(M), proved by
@@ -864,6 +911,29 @@ check('sanity: at most 10 warnings',
 check('sanity: the cap keeps the most serious first',
       attempt(lambda: got('t', {'d0'}, props, D11))
       == [('holds-for-any', 'd0', None)] + [('always-true', d, None) for d in D11[:9]])
+
+
+def given(env, t, defs, any_=frozenset(), shown=None):
+    return sanity.warnings(env, t, defs, any_, **({} if shown is None else {'shown': shown}))
+
+
+def every_list_accepted():
+    """validate_result on each list of warnings that the cases above give: warnings never fail a check."""
+    lists = [given(W, t, DEFS[t], ANY.get(t, set())) for t in WANT]
+    lists += [given(shapes, 't', ['Q', 'U', 'P'], {'P'}),
+              given(shapes, 't', ['Q', 'U', 'P'], {'P'}, lambda d, n: False),
+              given(shapes, 'names', []), given(shapes, 'let_y', []), given(shapes, 'big', ['Q'], {'Q'})]
+    lists += [given(PR, t, ds) for t, ds in (('Printed.u2', ['Printed.P2']), ('Printed.u4', ['Printed.P4']),
+                                             ('Printed.pos', ['Printed.Pos']), ('Printed.t5', []))]
+    lists += [given(props, 't', D11), given(props, 't', D11, {'d0'})]
+    rejected = [ws for ws in lists if result_rejected(warned(*ws))]
+    for ws in rejected:
+        print('      rejected: %r' % ws)
+    return len(lists) == 19 and not rejected
+
+
+check('result v2: every list of warnings that sanity.warnings gives here is accepted',
+      attempt(every_list_accepted) is True)
 
 T2 = [('A.t', ('A.f', 'A.g')), ('A.u', ()), ('A.v', ('A.h',))]
 check('read_verdicts: one line per pair',
@@ -944,7 +1014,7 @@ except ImportError as e:
 from vacheck import VERSION  # noqa: E402
 
 MODULES = {'good': 'Good', 'sorry': 'Sorry', 'axiom': 'Axiom', 'native': 'Native', 'fakeeq': 'FakeEq',
-           'replaced': 'Replaced'}
+           'replaced': 'Replaced', 'weak': 'Weak'}
 REPO, COMMIT, KERNELS = 'github.com/acme/proj', 'c' * 40, ['lean', 'nanoda']
 MB2 = 2 * 1024 * 1024
 _serial = iter(range(10 ** 6))
@@ -1006,12 +1076,26 @@ def source_tree(case, claims, project='core', ships=()):
     return root, parse_manifest(raw)
 
 
+def skipped(export, ref, manifest):
+    """The helper's verdicts as if it skipped every pair it re-checks; '' when the export cannot say."""
+    theorems = [c.theorem for c in manifest.claims]
+    try:
+        pairs = sanity.targets(export, theorems, va.project_constants(
+            export, ref if isinstance(ref, (list, tuple)) else [ref], theorems))
+    except vx.ExportError:
+        return ''
+    return ''.join('%d %d skipped\n' % (i, j) for i, (_, ds) in enumerate(pairs) for j in range(len(ds)))
+
+
 def run(case, theorems=(), tree=None, ref=None, export=None, pp=printer, repo=REPO,
-        manifest_path='.verificationalliance.json'):
-    """analyze on the fixture's export and its reference, with a new source tree unless `tree` is given."""
+        manifest_path='.verificationalliance.json', verdicts=None):
+    """analyze on the fixture's export and its reference, with a new source tree unless `tree` is given,
+    and the helper's verdicts: skipped for every pair unless given."""
     root, manifest = tree or source_tree(case, [('x', t, 'model') for t in theorems])
-    return va.analyze(envs[case] if export is None else export, refs[case] if ref is None else ref,
-                      manifest, root, repo, COMMIT, 'v4.36.0', KERNELS, pp, manifest_path)
+    export = envs[case] if export is None else export
+    ref = refs[case] if ref is None else ref
+    return va.analyze(export, ref, manifest, root, repo, COMMIT, 'v4.36.0', KERNELS, pp, manifest_path,
+                      skipped(export, ref, manifest) if verdicts is None else verdicts)
 
 
 def analysis_error(fn):
@@ -1388,6 +1472,43 @@ check('a symlinked project folder raises', analysis_error(symlinked_project) == 
 check('analyze takes manifest_path, with no default',
       attempt(lambda: __import__('inspect').signature(va.analyze).parameters['manifest_path'].default)
       is __import__('inspect').Parameter.empty)
+check("analyze takes the sanity helper's verdicts last, with no default",
+      attempt(lambda: [(n, p.default) for n, p in __import__('inspect').signature(va.analyze).parameters.items()][-1])
+      == ('verdicts', __import__('inspect').Parameter.empty))
+check("analyze: each claim has its warnings, from the helper's verdicts, and a null template",
+      attempt(lambda: [(c['warnings'], c['template']) for c in run(
+          'good', ['Good.t1', 'Good.pick_lowest'], verdicts='0 0 any\n1 0 any\n1 1 needed\n')['claims']])
+      == [([{'check': 'holds-for-any', 'name': 'Good.f', 'arg': None}], None),
+          ([{'check': 'holds-for-any', 'name': 'Good.lowest', 'arg': None}], None)])
+check("analyze: verdicts that cannot be read are rejected, naming them",
+      "the sanity helper's verdicts cannot be read" in (
+          analysis_error(lambda: run('good', ['Good.t1'], verdicts='0 0 any\n0 1 any\n')) or ''))
+check('statement binders: the names nanoda_bin prints before the statement\'s colon',
+      [attempt(lambda t=t: va._statement_binders(t)) for t in (
+          'theorem Weak.add_zero_of_valid (n : Nat) (h : Weak.Valid n) : Eq (HAdd.hAdd n (OfNat.ofNat 0)) n',
+          'theorem Printed.t5 : forall {α : Type 0} (xs : List α), Ne xs List.nil → Eq (List.length xs) (List.length xs)',
+          'theorem «Good.key never leaves» (n : Nat) : LT.lt n (Good.f n)',
+          'theorem Weak.vacuous (n : Nat) (h₁ : LT.lt n (OfNat.ofNat 2)) (h₂ : GT.gt n (OfNat.ofNat 5)) :\n  Eq n n',
+          'theorem T.x {α : Type 0} [inst : Inhabited α] [Inhabited Nat] (a b : α) ⦃«my c» : α⦄ :\n  P a')]
+      == [{'n', 'h'}, set(), {'n'}, {'n', 'h₁', 'h₂'}, {'α', 'inst', 'a', 'b', '«my c»'}])
+check('statement binders: none when where they end is not certain',
+      [attempt(lambda t=t: va._statement_binders(t)) for t in (
+          'theorem T.s (h : Eq "a : b" "a") : True', 'theorem T.u (h : P :\n  Q', 'theorem T.v (h : P)) : Q',
+          'theorem T.w h : P', 'def T.d (h : P) : Prop', 'theorem T.e (h : P)', 'theorem T.m (h : P] : Q')]
+      == [set()] * 7)
+
+
+def weak_pp(statement):
+    """A printer that prints Weak.add_zero_of_valid as statement."""
+    return lambda names: {n: statement if n == 'Weak.add_zero_of_valid' else '<pp %s>' % n for n in names}
+
+
+check('analyze: an unused assumption is named only when the statement prints it before its colon',
+      [attempt(lambda t=t: run('weak', ['Weak.add_zero_of_valid'], export=W, pp=weak_pp(t))['claims'][0]['warnings'])
+       for t in ('theorem Weak.add_zero_of_valid (n : Nat) (h : Weak.Valid n) : Eq (HAdd.hAdd n (OfNat.ofNat 0)) n',
+                 'theorem Weak.add_zero_of_valid : forall (n : Nat), Weak.Valid n → Eq (HAdd.hAdd n (OfNat.ofNat 0)) n')]
+      == [[{'check': 'unused-assumption', 'name': 'h', 'arg': None}],
+          [{'check': 'unused-assumption', 'name': None, 'arg': None}]])
 
 
 def manifest_elsewhere():

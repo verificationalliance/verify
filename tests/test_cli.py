@@ -22,7 +22,7 @@ NANODA = os.environ.get('NANODA_BIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0/bin/nanoda_bin')
 LEAN_TOOLCHAIN = os.environ.get('LEAN_TOOLCHAIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0')
-MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak'}
+MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak', 'printed': 'Printed'}
 REPO, COMMIT = 'github.com/acme/proj', 'c' * 40
 TMP = tempfile.mkdtemp(prefix='test_cli-')
 
@@ -200,12 +200,23 @@ def tree(case, claims, raw=None):
     return root
 
 
-def analyze(case, claims=(), root=None, nanoda=NANODA, toolchain='v4.36.0'):
+def skipped(case, root):
+    """A verdict file as if the sanity helper skipped every pair that sanity-targets lists for the
+    checkout's manifest: empty when it lists none, or rejects the manifest."""
+    r = cli('sanity-targets', '--export', os.path.join(FIXTURES, case + '.ndjson'), '--reference', REFS[case],
+            '--manifest', os.path.join(root, '.verificationalliance.json'))
+    pairs = [json.loads(line)[:2] for line in r.out.split('\n') if line] if r.code == 0 else []
+    return write(fresh('verdicts'), ''.join('%d %d skipped\n' % (i, j) for i, j in pairs))
+
+
+def analyze(case, claims=(), root=None, nanoda=NANODA, toolchain='v4.36.0', verdicts=None, abstracted=True):
+    """vacheck analyze on the fixture, with the verdict file given, or skipped's."""
     root = root or tree(case, claims)
+    more = ['--abstracted', verdicts or skipped(case, root)] if abstracted else []
     return cli('analyze', '--export', os.path.join(FIXTURES, case + '.ndjson'), '--reference', REFS[case],
                '--manifest', os.path.join(root, '.verificationalliance.json'), '--source', root,
                '--repo', REPO, '--commit', COMMIT, '--toolchain', toolchain, '--kernels', 'lean,nanoda',
-               '--nanoda', nanoda)
+               '--nanoda', nanoda, *more)
 
 
 def result_of(r):
@@ -253,9 +264,10 @@ check('an analysis error is escaped once: \\xab for «, not \\\\xab',
 moved = tree('good', (('x', 'Good.t1', 'model'),))
 os.makedirs(os.path.join(moved, 'sub'))
 os.rename(os.path.join(moved, '.verificationalliance.json'), os.path.join(moved, 'sub', 'va.json'))
+T1_SKIPPED = write(fresh('verdicts'), '0 0 skipped\n')  # Good.t1's one pair, Good.f
 r = cli('analyze', '--export', os.path.join(FIXTURES, 'good.ndjson'), '--reference', REFS['good'],
         '--manifest', os.path.join(moved, 'sub', 'va.json'), '--source', moved, '--repo', REPO, '--commit', COMMIT,
-        '--toolchain', 'v4.36.0', '--kernels', 'lean', '--nanoda', NANODA)
+        '--toolchain', 'v4.36.0', '--kernels', 'lean', '--nanoda', NANODA, '--abstracted', T1_SKIPPED)
 check('analyze reads the manifest that --manifest names', r.code == 0 and r.err == '')
 # --reference again for each library of the toolchain: every one that declares a name must agree.
 two = tree('good', (('x', 'Good.t1', 'model'),))
@@ -263,7 +275,8 @@ for refs_, name in (((REFS['good'], REFS['good']), 'two references that agree ac
                     ((REFS['good'], os.path.join(FIXTURES, 'fakeeq.ndjson')), 'a second reference whose Eq differs rejects')):
     r = cli('analyze', '--export', os.path.join(FIXTURES, 'good.ndjson'), *[a for p in refs_ for a in ('--reference', p)],
             '--manifest', os.path.join(two, '.verificationalliance.json'), '--source', two, '--repo', REPO,
-            '--commit', COMMIT, '--toolchain', 'v4.36.0', '--kernels', 'lean', '--nanoda', NANODA)
+            '--commit', COMMIT, '--toolchain', 'v4.36.0', '--kernels', 'lean', '--nanoda', NANODA,
+            '--abstracted', T1_SKIPPED)
     check(name, r.code == 0 and r.err == '' if 'accepted' in name else r.rejected("Eq differs from the toolchain's Eq"))
 
 # vacheck 1.1.2, with the real nanoda_bin: a structure with its constructor and named fields, a
@@ -372,12 +385,65 @@ check('sanity-targets names a guillemet theorem by its components',
       TARGETS['good'].code == 0 and TARGETS['good'].err == '' and len(good_lines) > 2
       and good_lines[1] == '[1,0,["Good","key never leaves"],["Good","f"]]')
 TARGET_FILES = {case: write(fresh(case + '-targets.jsonl'), t.raw) for case, t in TARGETS.items()}
+VERDICTS = {}
 for case, want in (('weak', '0 0 needed\n0 1 any\n1 0 needed\n1 1 needed\n2 0 any\n3 0 any\n4 0 any\n6 0 any\n'),
                    ('good', '0 0 any\n1 0 needed\n2 0 needed\n3 0 any\n3 1 needed\n')):
     h = helper(TARGET_FILES[case], os.path.join(FIXTURES, case + '.ndjson'))
     check('sanity helper: %s verdicts' % case, h is not None and h.code == 0 and h.err == '' and h.out == want)
     if h is not None and h.out != want:
         print('      exit %s, stdout %r, stderr %r' % (h.code, h.out, h.err))
+    VERDICTS[case] = write(fresh(case + '-verdicts'), h.raw if h is not None else b'')
+
+
+def fixture_claims(case):
+    with open(os.path.join(FIXTURES, case, '.verificationalliance.json'), encoding='utf-8') as f:
+        return [(c['says'], c['theorem'], c['about']) for c in json.load(f)['claims']]
+
+
+def warnings_of(r):
+    """Each claim's warnings in a result, as (check, name, arg), by theorem."""
+    return {c['theorem']: [(w['check'], w['name'], w['arg']) for w in c['warnings']]
+            for c in result_of(r).get('claims', [])}
+
+
+# analyze with the real helper's verdicts and nanoda_bin: the weak fixture's warnings are Task 2's table.
+WANT = {'Weak.prog_safe': [('holds-for-any', 'Weak.prog', None), ('always-true', 'Weak.Safe', None)],
+        'Weak.sort_example': [],
+        'Weak.add_zero_of_valid': [('holds-for-any', 'Weak.Valid', None), ('unused-assumption', 'h', None)],
+        'Weak.sort_length_self': [('holds-for-any', 'Weak.sort', None)],
+        'Weak.vacuous': [('holds-for-any', 'Weak.sort', None)],
+        'Weak.no_project': [('no-project-definition', None, None)],
+        'Weak.arrow': [('holds-for-any', 'Weak.Valid', None), ('unused-assumption', None, None)],
+        'Weak.by_lemma': [('no-project-definition', None, None)]}
+weak_run = analyze('weak', fixture_claims('weak'), verdicts=VERDICTS['weak'])
+weak_claims = result_of(weak_run).get('claims', [])
+check("analyze weak: each claim's warnings, and a null template",
+      weak_run.code == 0 and warnings_of(weak_run) == WANT and list(warnings_of(weak_run)) == list(WANT)
+      and all(c['template'] is None for c in weak_claims))
+if warnings_of(weak_run) != WANT:
+    print('      %r' % warnings_of(weak_run))
+good_warned = analyze('good', fixture_claims('good'), verdicts=VERDICTS['good'])
+check('analyze good: Good.t1 and Good.pick_lowest',
+      warnings_of(good_warned) == {'Good.t1': [('holds-for-any', 'Good.f', None)], 'Good.«key never leaves»': [],
+                                   'Good.anyIn_nil': [], 'Good.pick_lowest': [('holds-for-any', 'Good.lowest', None)]})
+# What the page prints: nanoda_bin prints t5 as `theorem Printed.t5 : forall {α : Type 0} (xs : List α), Ne xs
+# List.nil → ...`, so its unused h is not named; and P2 as `fun {α : Type 0} (m n : Nat) =>`, whose type
+# calls m n.
+printed_run = analyze('printed', fixture_claims('printed'))
+check('analyze printed: an assumption printed after the colon, and an argument named two ways, are not named',
+      {t: w for t, w in warnings_of(printed_run).items() if t in ('Printed.t5', 'Printed.u2', 'Printed.u4')}
+      == {'Printed.t5': [('no-project-definition', None, None), ('unused-assumption', None, None)],
+          'Printed.u2': [('ignores-argument', 'Printed.P2', None)],
+          'Printed.u4': [('ignores-argument', 'Printed.P4', None)]})
+short = write(fresh('verdicts'), open(VERDICTS['good'], 'rb').read().split(b'\n', 1)[1])
+check('analyze rejects a verdict file missing a line',
+      analyze('good', fixture_claims('good'), verdicts=short).rejected("the sanity helper's verdicts cannot be read"))
+r = analyze('good', fixture_claims('good'), abstracted=False)
+check('analyze needs --abstracted', r.code == 2 and r.out == '' and r.one_line() and '--abstracted' in r.err)
+v1 = result_of(good_warned)
+v1['schema'] = 'https://verificationalliance.org/attestations/proof-check/v1'
+check('validate rejects a v1 result',
+      cli('validate', write(fresh('result.json'), json.dumps(v1))).rejected('result.json is not valid'))
 
 
 def string_literal_export():

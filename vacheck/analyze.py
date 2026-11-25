@@ -21,7 +21,7 @@ import posixpath
 import re
 import stat
 
-from . import VERSION
+from . import VERSION, sanity
 from .export import (Budget, ExportError, axioms_of, constants_in_type, constructors, digest, fields, parameters,
                      value_constants)
 from .manifest import _STRIP
@@ -51,13 +51,15 @@ class AnalysisError(Exception):
         super().__init__(log_line(message))
 
 
-def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, kernels, printer, manifest_path):
+def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, kernels, printer, manifest_path,
+            verdicts):
     """result.json for the manifest's claims, or AnalysisError with a message for the developer's log.
 
     `reference` is the toolchain's own export of (at least) the library names that `export` uses, or
     a list of such exports, one per library of the toolchain: a name is the library's when any of
     them declares it, and must then be identical to every one that does.
     `source_dir` is the checkout, and `manifest_path` the manifest file's path inside it.
+    `verdicts` is what the sanity helper printed for sanity.targets of the claims (sanity.read_verdicts).
     """
     references = list(reference) if isinstance(reference, (list, tuple)) else [reference]
     theorems = [c.theorem for c in manifest.claims]
@@ -96,8 +98,13 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
                                         % (t, ax))
         # 5. The project's own constants in each type: those the library does not have.
         defs = project_constants(export, references, theorems)
+        pairs = sanity.targets(export, theorems, defs)
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
+    try:
+        holds_for_any = sanity.read_verdicts(verdicts, pairs)
+    except sanity.SanityError as e:
+        raise AnalysisError("the sanity helper's verdicts cannot be read: %s" % e) from None
 
     # 4 and 5. Statements and definitions as printed from the checked export, and the constructors
     # of an inductive type among the definitions, to show them with it.
@@ -115,6 +122,15 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         for n in names:
             text, term = (printed[n], None) if n in theorems else _definition(export, n, printed, ctors)
             shown[n], terms[n] = _hygiene(text), None if term is None else _capped(_hygiene(term))
+    except ExportError as e:
+        raise AnalysisError('the export cannot be read: %s' % e) from None
+
+    # The sanity checks' warnings. An unused assumption is named only when nanoda_bin prints it among
+    # the binders before the statement's colon, where the report shows it.
+    before_colon = {t: _statement_binders(printed[t]) for t in theorems}
+    try:
+        warnings = {t: sanity.warnings(export, t, defs[t], holds_for_any[t], lambda d, n: n in before_colon[d])
+                    for t in theorems}
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
 
@@ -180,6 +196,8 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
             'defs': [{'name': d, 'text': shown[d], 'source': source(d), 'term': terms[d]} for d in defs[c.theorem]],
             'axioms': axioms[c.theorem],
             'source': source(c.theorem),
+            'warnings': warnings[c.theorem],
+            'template': None,
         })
     result = {
         'schema': SCHEMA,
@@ -502,6 +520,38 @@ def _header(text):
         return None
     flat = _flat(head)
     return flat if len(flat) <= WIDTH and '«' not in head else head
+
+
+_THEOREM = re.compile(r'theorem (?:«[^»]*»|[^\s«])+')
+_BRACKETS = dict(zip(_OPENING, _CLOSING))
+
+
+def _statement_binders(text):
+    """The names among the binders that nanoda_bin prints before a statement's colon, `theorem <name>
+    (a b : A) {c : C} [i : I] ⦃d : D⦄ : <type>`, where the report shows them. Empty when where the
+    binders end is not certain: a string in the text, brackets that do not balance, or anything else
+    before the colon."""
+    flat = _flat(text)
+    m = _THEOREM.match(flat)
+    rest = flat[m.end():] if m else ''
+    colons = _depth_zero(rest, ' : ')
+    if not colons:
+        return frozenset()
+    head = rest[:colons[0]]
+    spaces = _depth_zero(head, ' ')
+    if spaces is None:
+        return frozenset()
+    cuts = [-1] + spaces + [len(head)]
+    names = set()
+    for group in (head[a + 1:b] for a, b in zip(cuts, cuts[1:])):
+        if not group:
+            continue
+        colon = _depth_zero(group[1:-1], ' : ') if group[0] in _BRACKETS else None
+        if colon is None or group[-1] != _BRACKETS[group[0]]:
+            return frozenset()
+        if colon:  # `[Inhabited Nat]` names nothing
+            names.update(re.findall(r'(?:«[^»]*»|[^\s«])+', group[1:colon[0] + 1]))
+    return frozenset(names)
 
 
 def _unwrap(part):
