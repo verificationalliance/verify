@@ -21,17 +21,20 @@ jobs:
           persist-credentials: false
 
       # tests/test_cli.py prints statements with the real nanoda_bin of the v4.36.0 toolchain, and
-      # builds the sanity helper with its lean and leanc, as the check action does.
-      - name: Get the pinned toolchain
+      # builds the sanity helper with its lean and leanc, as the check action does; then again with
+      # v4.35.0's, the other toolchain a project may pin.
+      - name: Get the pinned toolchains
         run: |
-          read -r url sha < <(python3 -I -c 'import json, sys; t = json.load(open(sys.argv[1]))["v4.36.0"]; print(t["url"], t["sha256"])' vacheck/toolchains.json)
-          curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" "$url"
-          echo "$sha  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
-          mkdir "$RUNNER_TEMP/lean"
-          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP/lean" --strip-components=1
-          rm "$RUNNER_TEMP/lean.tar.zst"
-          echo "NANODA_BIN=$RUNNER_TEMP/lean/bin/nanoda_bin" >> "$GITHUB_ENV"
-          echo "LEAN_TOOLCHAIN=$RUNNER_TEMP/lean" >> "$GITHUB_ENV"
+          for version in v4.35.0 v4.36.0; do
+            read -r url sha < <(python3 -I -c 'import json, sys; t = json.load(open(sys.argv[1]))[sys.argv[2]]; print(t["url"], t["sha256"])' vacheck/toolchains.json "$version")
+            curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" "$url"
+            echo "$sha  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+            mkdir "$RUNNER_TEMP/lean-$version"
+            tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP/lean-$version" --strip-components=1
+            rm "$RUNNER_TEMP/lean.tar.zst"
+          done
+          echo "NANODA_BIN=$RUNNER_TEMP/lean-v4.36.0/bin/nanoda_bin" >> "$GITHUB_ENV"
+          echo "LEAN_TOOLCHAIN=$RUNNER_TEMP/lean-v4.36.0" >> "$GITHUB_ENV"
 
       - name: test_workflows
         run: python3 -I tests/test_workflows.py
@@ -41,3 +44,6 @@ jobs:
 
       - name: test_cli
         run: python3 -I tests/test_cli.py
+
+      - name: test_cli, the sanity helper built by v4.35.0
+        run: LEAN_TOOLCHAIN="$RUNNER_TEMP/lean-v4.35.0" python3 -I tests/test_cli.py
