@@ -56,8 +56,8 @@ defaults:
 
 env:
   MANIFEST: ${{ inputs.manifest }}
-  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v2.0.1/vacheck.pyz
-  VACHECK_SHA256: ec92d8cf02061d74a3a6949949063cd2d1582e4dc757fb343ae15e4b1016d240
+  VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v2.0.2/vacheck.pyz
+  VACHECK_SHA256: b98de62f3e813c89f1f31224ad226db0b2bc916d9202edd06676c6eba1c9f905
   MAX_EXPORT: "2147483648" # 2 GiB
   # The base64 of vacheck's largest result (96,000 bytes). Job sign reads it from an environment
   # variable, and Linux caps one at 128 KiB: 131,064 characters pass and 131,072 fail.
