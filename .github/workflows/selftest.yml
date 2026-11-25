@@ -251,8 +251,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-            --jq '.jobs[] | [.name, .conclusion] | @tsv' > jobs.tsv
+          # The API can list a job that has just ended before its conclusion: read the jobs again
+          # until every fixture's jobs have one.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+              --jq '.jobs[] | [.name, .conclusion // ""] | @tsv' > jobs.tsv
+            awk -F'\t' '$1 ~ / \/ / && $2 == "" { found = 1 } END { exit !found }' jobs.tsv || break
+            sleep 10
+          done
           cut -f1,2 jobs.tsv
           for c in sorry fakeeq native axiom forge; do
             test "$(awk -F'\t' -v n="$c / check" '$1 == n {print $2}' jobs.tsv)" = failure
