@@ -173,7 +173,7 @@ def run_blocks(lines):
             continue
         key = len(m.group(1)) + (2 if m.group(2) else 0)
         value = m.group(3).strip()
-        if value in ('', '|', '|-', '>'):
+        if value == '' or re.fullmatch(r'[|>][-+0-9]*', value):
             body = []
             for line2 in lines[i + 1:]:
                 if line2.strip() and indent(line2) <= key:
@@ -195,6 +195,9 @@ check('no run: script in lean.yml or the action holds ${{',
 check('... an expression in a run: script is found, a block or one line',
       expression_in_run([line.replace('va="$RUNNER_TEMP/va"', 'va="${{ runner.temp }}/va"', 1) for line in action])
       and expression_in_run(lean + ['      - run: echo ${{ inputs.manifest }}']))
+check('... and in a block of any style: >-, |+, |2, >',
+      all(expression_in_run(lean + ['      - run: %s' % style, '          echo ${{ inputs.manifest }}'])
+          for style in ('>-', '|+', '|2', '>')))
 
 
 # The schema the attestation is made for is vacheck's result schema, wherever a file names one.
@@ -337,6 +340,52 @@ for what, old, new in (
          'or the sandbox does not isolate them."\n          exit 1', 'or the sandbox does not isolate them."\n          true')):
     broken = edited(old, new)
     check('... %s is found' % what, broken is not None and limited_problems(broken) != [])
+
+
+# The marker: the helper's verdicts reach Analyze only after a clean exit of the helper, this run.
+MARKER_CHECK = ['sanity=(--sanity-stopped)', 'if [[ -e "$va/sanity-done" ]]; then',
+                'sanity=(--abstracted "$va/verdicts")', 'fi']
+
+
+def marker_problems(lines):
+    script, analyze = run_script(lines, SANITY_STEP), run_script(lines, 'Analyze')
+    if script is None or analyze is None:
+        return ['no sanity step or Analyze']
+    problems = []
+    cmds = [' '.join(c.split()) for c in commands(script)]
+    marks = [i for i, c in enumerate(cmds) if 'sanity-done' in c]
+    calls = [i for i, c in enumerate(cmds) if re.search(r'(^|[|&!(;] *)limited ', c)]
+    if not marks or cmds[marks[0]] != 'rm -f "$va/sanity-done"' or not calls or marks[0] > calls[0]:
+        problems.append('the marker is not removed first')
+    touches = [i for i in marks if cmds[i] == 'touch "$va/sanity-done"']
+    helper = [i for i, c in enumerate(cmds) if ' -- "$work/sanity" ' in c]
+    if (len(marks) != 2 or len(touches) != 1 or len(helper) != 1 or touches[0] != helper[0] + 1
+            or not cmds[helper[0]].endswith('|| stopped "the helper exited with $?" "$work/sanity.log"')):
+        problems.append('the marker is not made only right after a clean exit of the helper')
+    acmds = [' '.join(c.split()) for c in commands(analyze)]
+    at = [i for i in range(len(acmds)) if acmds[i:i + 4] == MARKER_CHECK]
+    if len(at) != 1 or sum(c.count('--abstracted') for b in run_blocks(lines) for c in commands(b)) != 1:
+        problems.append('--abstracted is passed outside the marker check')
+    return problems
+
+
+check('the marker: removed first, made only after a clean exit of the helper, read before --abstracted',
+      marker_problems(action) == [])
+for what, old, new in (
+        ('a marker not removed first', '        rm -f "$va/sanity-done"\n', ''),
+        ('a marker never made', '        touch "$va/sanity-done"\n', ''),
+        ('a marker made before the helper runs', '        # Exit 124 is the deadline',
+         '        touch "$va/sanity-done"\n        # Exit 124 is the deadline'),
+        ('a marker made even when the helper fails',
+         '\n          || stopped "the helper exited with $?" "$work/sanity.log"', ' || true'),
+        ('--abstracted outside the marker check',
+         'sanity=(--sanity-stopped)\n        if [[ -e "$va/sanity-done" ]]; then\n'
+         '          sanity=(--abstracted "$va/verdicts")\n        fi',
+         'sanity=(--abstracted "$va/verdicts")'),
+        ('--abstracted passed again', '          "${sanity[@]}" \\\n',
+         '          "${sanity[@]}" --abstracted "$va/verdicts" \\\n')):
+    broken = edited(old, new)
+    check('... %s is found' % what, broken is not None and marker_problems(broken) != [])
 
 
 # scripts/release.sh, in a repository of its own: this checkout's history may be shallow.
