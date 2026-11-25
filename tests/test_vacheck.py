@@ -840,6 +840,24 @@ helpers = attempt(hb.env)
 check('sanity: a _unary or _mutual helper reaches the definition it serves',
       attempt(lambda: sanity.targets(helpers, ['t', 'u'], {'t': ['F', 'F._unary'], 'u': ['G', 'G._mutual']}))
       == [('t', ()), ('u', ())])
+# A theorem in a statement is one fact, whatever its proof: lem's proof names D, yet lem takes no step to
+# D. The members of an inductive block reach each other: I.a reaches D through I.b : D → I. And a name
+# that does not read back as itself (a component holding » and a dot, which Lean leaves as it is)
+# reaches anything: what it would reach is not known.
+rb = Build()
+rb.define('D', rb.expr('sort', 0), rb.const('True'))
+rb.theorem('lem', rb.const('True'), rb.const('D'))
+rb.inductive('I', rb.expr('sort', 0), [('a', rb.const('I'), 0),
+                                       ('b', rb.bind('forallE', ('x',), rb.const('D'), rb.const('I')), 1)])
+rb.define('a»b.c', rb.expr('sort', 0), rb.const('True'))
+for thm, comps in (('by_lem', ('lem',)), ('by_ctor', ('I', 'a')), ('by_name', ('a»b.c',))):
+    rb.theorem(thm, rb.expr('app', {'fn': rb.const(*comps), 'arg': rb.const('D')}), rb.const('True', 'intro'))
+reached = attempt(rb.env)
+check("sanity: a theorem's proof takes no step, an inductive block's members reach each other, and a name "
+      "that does not read back reaches anything",
+      attempt(lambda: sanity.targets(reached, ['by_lem', 'by_ctor', 'by_name'],
+                                     {t: ['D'] for t in ('by_lem', 'by_ctor', 'by_name')}))
+      == [('by_lem', ('D',)), ('by_ctor', ()), ('by_name', ())])
 check("sanity: an argument's explicitness comes from the definition's type, its use from the value, its name from both",
       attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'])) == T_WANT)
 check('sanity: an assumption is judged only when the rest of the statement does not mention it',
@@ -977,7 +995,7 @@ for bad in ('0 0 any\n2 0 any\n', '0 0 any\n0 1 any\n2 0 any\n2 0 any\n', '0 1 a
             '0 0 maybe\n0 1 any\n2 0 any\n', '0 0 any\n0 1 any\n2 0 any', '0 0 any\n0 1 any\n2 0 any\n3 0 any\n',
             '00 0 any\n0 1 any\n2 0 any\n', '0 0 any\r\n0 1 any\n2 0 any\n', '0 0 any \n0 1 any\n2 0 any\n',
             '0  0 any\n0 1 any\n2 0 any\n', '٠ 0 any\n0 1 any\n2 0 any\n', '0 0 ANY\n0 1 any\n2 0 any\n',
-            b'0 0 any\n0 1 any\n2 0 any\n', '0 0 any\n0 1 any\n', ''):
+            b'0 0 any\n0 1 any\n2 0 any\n', '0 0 any\n0 1 any\n', '', '0 0 any\n0 1 any\n2 0 any\nmaybe'):
     check('read_verdicts: rejected %r' % bad,
           attempt(lambda: raises(lambda: sanity.read_verdicts(bad, T2), sanity.SanityError)) is True)
 
