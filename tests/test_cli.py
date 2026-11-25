@@ -1,6 +1,6 @@
 """The command line, run as the workflow runs it: `python3 -I vacheck.pyz ...`, with the zipapp that
-scripts/release.sh builds, on the fixtures, and with the real nanoda_bin of the v4.36.0 toolchain
-(NANODA_BIN overrides where it is)."""
+scripts/build.sh builds for a release, on the fixtures, and with the real nanoda_bin of the v4.36.0
+toolchain (NANODA_BIN overrides where it is)."""
 import glob
 import hashlib
 import json
@@ -69,21 +69,21 @@ def canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
 
-def release(out_dir):
-    return subprocess.run(['bash', os.path.join(ROOT, 'scripts', 'release.sh'), out_dir],
+def build_pyz(out_dir):
+    return subprocess.run(['bash', os.path.join(ROOT, 'scripts', 'build.sh'), out_dir],
                           capture_output=True, text=True)
 
 
 # The zipapp, built as a release builds it.
 OUT1, OUT2 = fresh('dist'), fresh('dist')
-build = attempt(lambda: release(OUT1))
+build = attempt(lambda: build_pyz(OUT1))
 PYZ = os.path.join(OUT1, 'vacheck.pyz')
-check('release.sh builds vacheck.pyz and prints its sha256',
+check('build.sh builds vacheck.pyz and prints its sha256',
       build is not None and build.returncode == 0 and os.path.isfile(PYZ)
       and build.stdout.split()[:1] == [sha256_of(PYZ)])
 time.sleep(2)  # zip times have a resolution of two seconds
-build2 = attempt(lambda: release(OUT2))
-check('release.sh builds the same bytes every time',
+build2 = attempt(lambda: build_pyz(OUT2))
+check('build.sh builds the same bytes every time',
       build2 is not None and build2.returncode == 0 and os.path.isfile(PYZ)
       and sha256_of(os.path.join(OUT2, 'vacheck.pyz')) == sha256_of(PYZ))
 
@@ -413,7 +413,8 @@ def invisible(path):
 
 
 sources = sorted(glob.glob(os.path.join(ROOT, 'vacheck', '*.py'))) + [
-    os.path.abspath(__file__), os.path.join(ROOT, 'scripts', 'release.sh')]
+    os.path.abspath(__file__), os.path.join(ROOT, 'scripts', 'build.sh'),
+    os.path.join(ROOT, 'scripts', 'release.sh')]
 found = {os.path.relpath(p, ROOT): invisible(p) for p in sources}
 check('invisible characters are written as escapes in the sources', len(found) > 5 and not any(found.values()))
 if any(found.values()):

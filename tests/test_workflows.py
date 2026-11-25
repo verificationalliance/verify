@@ -3,10 +3,15 @@ share. The action cannot use lean.yml's YAML anchors, so it writes out its own c
 build or sign also runs: the runner test, the checker and its scripts, the manifest reading and the
 toolchain. A check that ran another checker, sandbox or runner test than build and sign would not be
 the check this repository describes, so each copy's script, each constant and each action's pin must
-be the same in both files. The files are read as text: the tests use the standard library only."""
+be the same in both files. The files are read as text: the tests use the standard library only.
+Then scripts/release.sh, which refuses a release whose lean.yml pins another check action than the
+release commit's own, is run on a repository of commits made here."""
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEAN = os.path.join(ROOT, '.github', 'workflows', 'lean.yml')
@@ -112,6 +117,78 @@ changed = [line.replace('HEAD, TAIL = 100, 300', 'HEAD, TAIL = 100, 301') for li
 check('a copy changed by one character differs',
       run_script(changed, 'Get the checker') != run_script(lean, 'Get the checker'))
 check('a step called twice is not read', run_script(lean + lean, 'Get the checker') is None)
+
+
+
+# scripts/release.sh, in a repository of its own: this checkout's history may be shallow.
+def git(*args):
+    return subprocess.run(['git', '-C', REPO] + list(args), env=GIT_ENV, capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def commit(message):
+    git('add', '-A')
+    git('commit', '-q', '-m', message)
+    return git('rev-parse', 'HEAD')
+
+
+def edit(path, old, new):
+    path = os.path.join(REPO, path)
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(re.sub(old, new, text, count=1))
+
+
+def release():
+    r = subprocess.run(['bash', os.path.join(REPO, 'scripts', 'release.sh'), os.path.join(TMP, 'dist')],
+                       env=GIT_ENV, capture_output=True, text=True)
+    return r.returncode, r.stdout
+
+
+def pin(sha):
+    edit(LEAN_PATH, r'(uses: verificationalliance/verify/\.github/actions/check@)[0-9a-f]{40}', r'\g<1>' + sha)
+
+
+TMP = tempfile.mkdtemp(prefix='test_workflows-')
+REPO = os.path.join(TMP, 'repo')
+LEAN_PATH = os.path.join('.github', 'workflows', 'lean.yml')
+ACTION_PATH = os.path.join('.github', 'actions', 'check', 'action.yml')
+GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_AUTHOR_NAME='t',
+               GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+try:
+    for d in ('scripts', 'vacheck', '.github'):
+        shutil.copytree(os.path.join(ROOT, d), os.path.join(REPO, d), ignore=shutil.ignore_patterns('__pycache__'))
+    subprocess.run(['git', 'init', '-q', REPO], env=GIT_ENV, capture_output=True, check=True)
+    pin('0' * 40)
+    first = commit('the action, pinned at no commit')
+    check('release.sh refuses a pin that is no commit', release()[0] == 1)
+    pin(first)
+    second = commit('pinned at the commit before')
+    code, out = release()
+    check('release.sh releases a pin whose action is the release commit\'s, and prints the sha256',
+          code == 0 and re.fullmatch(r'[0-9a-f]{64}  \S+vacheck\.pyz\n', out) is not None)
+    edit(ACTION_PATH, 'HEAD, TAIL = 100, 300', 'HEAD, TAIL = 100, 301')
+    check('release.sh refuses an action changed and not committed', release()[0] == 1)
+    commit('the action changed after its pin')
+    check('release.sh refuses an action changed after its pin', release()[0] == 1)
+    pin(git('rev-parse', 'HEAD'))
+    commit('pinned again')
+    check('release.sh releases once the pin is the action\'s commit again', release()[0] == 0)
+    with open(os.path.join(REPO, LEAN_PATH), 'a', encoding='utf-8') as f:
+        f.write('      - uses: verificationalliance/verify/.github/actions/check@%s # workflow-7\n' % second)
+    commit('the action run again, pinned at an earlier action')
+    check('release.sh refuses the action run twice', release()[0] == 1)
+    git('reset', '-q', '--hard', 'HEAD~1')
+    pin(second)
+    commit('pinned at a commit whose action differs')
+    check('release.sh refuses a pin at an earlier action', release()[0] == 1)
+    edit(LEAN_PATH, r'uses: verificationalliance/verify/\.github/actions/check@[0-9a-f]{40} # \S+',
+         'uses: ./.github/actions/check')
+    commit('the ./ form')
+    check('release.sh refuses the action named by ./', release()[0] == 1)
+finally:
+    shutil.rmtree(TMP)
 
 if failures:
     print('FAILED: ' + ', '.join(failures))
