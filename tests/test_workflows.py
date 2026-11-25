@@ -204,12 +204,15 @@ def expression_in_run(lines):
     return [b for b in run_blocks(lines) if '${{' in b]
 
 
-check('no run: script in lean.yml or the action holds ${{',
-      len(run_blocks(lean)) > 5 and len(run_blocks(action)) > 10
-      and expression_in_run(lean) == [] and expression_in_run(action) == [])
+SELFTEST = os.path.join(ROOT, '.github', 'workflows', 'selftest.yml')
+selftest = lines_of(SELFTEST)
+check('no run: script in lean.yml, the action or selftest holds ${{',
+      len(run_blocks(lean)) > 5 and len(run_blocks(action)) > 10 and len(run_blocks(selftest)) > 5
+      and expression_in_run(lean) == [] and expression_in_run(action) == [] and expression_in_run(selftest) == [])
 check('... an expression in a run: script is found, a block or one line',
       expression_in_run([line.replace('va="$RUNNER_TEMP/va"', 'va="${{ runner.temp }}/va"', 1) for line in action])
-      and expression_in_run(lean + ['      - run: echo ${{ inputs.manifest }}']))
+      and expression_in_run(lean + ['      - run: echo ${{ inputs.manifest }}'])
+      and expression_in_run([line.replace('$GITHUB_RUN_ID', '${{ github.run_id }}') for line in selftest]))
 check('... and in a block of any style: >-, |+, |2, >',
       all(expression_in_run(lean + ['      - run: %s' % style, '          echo ${{ inputs.manifest }}'])
           for style in ('>-', '|+', '|2', '>')))
@@ -219,14 +222,10 @@ check('... and in a block of any style: >-, |+, |2, >',
 sys.path.insert(0, ROOT)
 from vacheck.result import SCHEMA  # noqa: E402
 SCHEMA_URL = re.compile(r'https://verificationalliance\.org/attestations/proof-check/v[0-9]+')
-SELFTEST = os.path.join(ROOT, '.github', 'workflows', 'selftest.yml')
-
-
 def schemas(lines):
     return SCHEMA_URL.findall('\n'.join(lines))
 
 
-selftest = lines_of(SELFTEST)
 check('lean.yml signs under result.SCHEMA, selftest verifies under it, and the action names it',
       any(line.strip() == 'predicate-type: ' + SCHEMA for line in lean)
       and any(line.strip() == '--predicate-type %s \\' % SCHEMA for line in selftest)
