@@ -701,6 +701,19 @@ class Build:
         self.lines.append(json.dumps({'thm': {'name': n, 'levelParams': [], 'type': type_, 'value': value,
                                               'all': [n]}}))
 
+    def inductive(self, name, type_, ctors):
+        """An inductive type without parameters or indices, with constructors (name, type, number of fields)."""
+        n, cs = self.name(name), [(self.name(name, c), t, k) for c, t, k in ctors]
+        rec = self.name(name, 'rec')
+        self.lines.append(json.dumps({'inductive': {
+            'types': [{'name': n, 'levelParams': [], 'type': type_, 'numParams': 0, 'numIndices': 0, 'all': [n],
+                       'ctors': [c for c, _, _ in cs], 'numNested': 0, 'isRec': False, 'isReflexive': False,
+                       'isUnsafe': False}],
+            'ctors': [{'name': c, 'levelParams': [], 'type': t, 'induct': n, 'cidx': i, 'numParams': 0,
+                       'numFields': k, 'isUnsafe': False} for i, (c, t, k) in enumerate(cs)],
+            'recs': [{'name': rec, 'levelParams': [], 'type': type_, 'all': [n], 'numParams': 0, 'numIndices': 0,
+                      'numMotives': 1, 'numMinors': len(cs), 'rules': [], 'k': False, 'isUnsafe': False}]}}))
+
     def env(self):
         return vx.load_export(export_file(self.lines))
 
@@ -739,6 +752,13 @@ b.theorem('names', chain(b, 'forallE', [((n,), 'default') for n in NAMES], b.con
 # big : ∀ (x : Nat), True := fun x => #(2^40): a bound variable whose set of indices would not fit.
 b.theorem('big', chain(b, 'forallE', [(('x',), 'default')], b.const('True')),
           chain(b, 'lam', [(('x',), 'default')], b.expr('bvar', 2 ** 40)))
+# let_x : ∀ (x : Nat), True := fun x => let y := True.intro; x uses x through the let, and let_y, whose
+# body is y, does not.
+for name, body in (('let_x', 1), ('let_y', 0)):
+    b.theorem(name, chain(b, 'forallE', [(('x',), 'default')], b.const('True')),
+              chain(b, 'lam', [(('x',), 'default')], b.expr('letE', {'name': b.name('y'), 'type': b.const('True'),
+                                                                     'value': INTRO, 'body': b.expr('bvar', body),
+                                                                     'nondep': False})))
 shapes = attempt(b.env)
 T_WANT = [('holds-for-any', 'P', None), ('ignores-argument', 'Q', 'p.q'), ('ignores-argument', 'P', None),
           ('unused-assumption', 'c', None)]
@@ -749,6 +769,10 @@ check("sanity: an argument's name and explicitness come from the definition's ty
 check('sanity: an assumption is judged only when the rest of the statement does not mention it',
       attempt(lambda: [w for w in got('t', set(), shapes, ['Q']) if w[0] == 'unused-assumption'])
       == [('unused-assumption', 'c', None)])
+check("sanity: a let's body is under one more binder",
+      attempt(lambda: (got('let_x', set(), shapes, []), got('let_y', set(), shapes, [])))
+      == ([('no-project-definition', None, None)],
+          [('no-project-definition', None, None), ('unused-assumption', 'x', None)]))
 asked = []
 check('sanity: a name the page does not show is None, and only warned names are asked about',
       attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'], shown=lambda n: asked.append(n) or n != 'c'))
@@ -1723,7 +1747,7 @@ check('each auxiliary of compiled recursion and match counts on its own; other c
 
 def with_fields(fs):
     saved = va.fields
-    va.fields = lambda env, ctor: fs
+    va.fields = lambda env, ctor, budget=None: fs
     try:
         return va._constructor(good, 'Good.Range.mk', NANO['Good.Range.mk'])
     finally:
@@ -1736,6 +1760,96 @@ check('a constructor whose fields the export says are dependent, implicit or unn
           [(None, 'default', False), ('hi', 'default', False)], None)]
       == ['Good.Range.mk : Nat → Nat → Good.Range'] * 4
       and attempt(lambda: with_fields([('lo', 'default', False), ('hi', 'default', False)])) == 'Good.Range.mk (lo hi : Nat) : Good.Range')
+
+
+def walk_fields(env, ctor):
+    """What fields gives, but each field's dependence found by a walk of its own through the rest of the
+    constructor's type, at every depth: [(binder info, dependent)], or None."""
+    d = env._decls[env._decl(ctor)]
+    e, out = d.fields['type'], []
+    for i in range(d.fields['numParams'] + d.fields['numFields']):
+        node = env._exprs[e]
+        if node[0] != 'forallE':
+            return None
+        if i >= d.fields['numParams']:
+            stack, seen, dep = [(node[3], 0)], set(), False
+            while stack and not dep:
+                x, k = stack.pop()
+                if (x, k) in seen:
+                    continue
+                seen.add((x, k))
+                n = env._exprs[x]
+                if n[0] == 'bvar':
+                    dep = n[1] == k
+                elif n[0] in ('lam', 'forallE'):
+                    stack += [(n[2], k), (n[3], k + 1)]
+                elif n[0] == 'letE':
+                    stack += [(n[2], k), (n[3], k), (n[4], k + 1)]
+                else:
+                    stack += [(n[j], k) for j in vx._EXPR_KIDS[n[0]]]
+            out.append((node[4], dep))
+        e = node[3]
+    return out
+
+
+def fields_as_walked(env):
+    ctors = [env._render(c) for c, d in env._decls.items() if d.kind == 'ctor']
+    got_ = [vx.fields(env, c) for c in ctors]
+    differ = [c for c, g in zip(ctors, got_)
+              if (g if g is None else [(i, dep) for _, i, dep in g]) != walk_fields(env, c)]
+    print('      %d constructors, %d differ %s' % (len(ctors), len(differ), differ[:3]))
+    return len(ctors) >= 20 and not differ
+
+
+check('fields: as a walk per field finds them, on every constructor of good and weak',
+      attempt(lambda: fields_as_walked(good) and fields_as_walked(W)) is True)
+
+
+def hostile_ctor(d, m):
+    """H.mk, of D fields each of the type L(M) of hostile(); H.big, whose one field's type is a bound
+    variable whose set of indices would not fit; and H2.a (x : Nat) and H2.b (y : Bool), small."""
+    b = Build()
+    term = b.expr('bvar', d + m)
+    for _ in range(m):
+        term = b.bind('forallE', (), term, term)
+    h = b.const('H')
+    mk = h
+    for i in reversed(range(d)):
+        mk = b.bind('forallE', ('f%d' % i,), term, mk)
+    big = b.bind('forallE', ('x',), b.expr('bvar', 2 ** 40), h)
+    b.inductive('H', b.expr('sort', 0), [('mk', mk, d), ('big', big, 1)])
+    h2 = b.const('H2')
+    b.inductive('H2', b.expr('sort', 0), [('a', b.bind('forallE', ('x',), b.const('Nat'), h2), 1),
+                                          ('b', b.bind('forallE', ('y',), b.const('Bool'), h2), 1)])
+    return b.env()
+
+
+def timed_fields(env, ctor):
+    t0 = time.monotonic()
+    out = vx.fields(env, ctor)
+    secs = time.monotonic() - t0
+    print('      %.2f s' % secs)
+    return out, secs < 2
+
+
+hctor = attempt(lambda: hostile_ctor(1600, 1600))
+check('fields: 1600 fields over a shared term of 1600 nodes, in under 2 s',
+      attempt(lambda: timed_fields(hctor, 'H.mk')) == ([('f%d' % i, 'default', False) for i in range(1600)], True))
+H2 = {'H2': 'inductive H2 : Prop', 'H2.a': 'constructor H2.a : Nat → H2', 'H2.b': 'constructor H2.b : Bool → H2'}
+check('fields: past its budget None, so the constructor is shown as nanoda_bin printed it',
+      attempt(lambda: vx.fields(hctor, 'H.big')) is None
+      and attempt(lambda: va._constructor(hctor, 'H.big', 'constructor H.big : x → H')) == 'H.big : x → H'
+      # Good.Range.mk's type is 4 expressions: its two foralls, Nat and Good.Range.
+      and attempt(lambda: with_steps(3, lambda: (vx.fields(good, 'Good.Range.mk'),
+                                                 va._constructor(good, 'Good.Range.mk', NANO['Good.Range.mk']))))
+      == (None, 'Good.Range.mk : Nat → Nat → Good.Range'))
+# H2.a takes 3 steps (its forall, Nat, H2) and H2.b 2 more (H2 is known): one budget of 4 for the type
+# covers the first and not the second.
+check("fields: an inductive type's constructors share one budget",
+      attempt(lambda: with_steps(4, lambda: va._definition(hctor, 'H2', H2, {'H2': ['H2.a', 'H2.b']})))
+      == ('inductive H2 : Prop\nconstructors:\n  H2.a (x : Nat) : H2\n  H2.b : Bool → H2', None)
+      and attempt(lambda: va._definition(hctor, 'H2', H2, {'H2': ['H2.a', 'H2.b']}))
+      == ('inductive H2 : Prop\nconstructors:\n  H2.a (x : Nat) : H2\n  H2.b (y : Bool) : H2', None))
 check('names with macro scopes: one per name, numbered when two differ, constants too, «» names untouched',
       [attempt(lambda t=t: va._hygiene(t)) for t in (
           'f x._@.M._hyg.1 x._@.M._hyg.1', '(x._@.M._hyg.1 : A) (x._@.N._hygCtx._hyg.2 : B) y._@.M._hyg.3',

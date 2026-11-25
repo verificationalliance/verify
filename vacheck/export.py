@@ -369,30 +369,6 @@ class Env:
                     stack.append(node[i])
         return out
 
-    def _mentions_bvar(self, root):
-        """Whether the expression mentions the bound variable just outside it (de Bruijn index 0 at
-        its top), under any number of binders."""
-        stack, seen, exprs = [(root, 0)], set(), self._exprs
-        while stack:
-            e, depth = stack.pop()
-            if (e, depth) in seen:
-                continue
-            seen.add((e, depth))
-            node = exprs[e]
-            tag = node[0]
-            if tag == 'bvar':
-                if node[1] == depth:
-                    return True
-            elif tag in ('lam', 'forallE'):
-                stack.append((node[2], depth))
-                stack.append((node[3], depth + 1))
-            elif tag == 'letE':
-                stack.extend(((node[2], depth), (node[3], depth), (node[4], depth + 1)))
-            else:
-                for i in _EXPR_KIDS[tag]:
-                    stack.append((node[i], depth))
-        return False
-
     def _name_hash(self, c):
         memo = self._nhash
         chain = []
@@ -566,11 +542,12 @@ def parameters(env, name):
     return d.fields['numParams']
 
 
-def fields(env, ctor):
+def fields(env, ctor, budget=None):
     """The fields of constructor `ctor`, after its parameters, as (name, binder info, dependent): the
     binder's name as one plain identifier, or None when it is anonymous, has more than one component
     or is not an identifier; and whether a later binder or the result mentions it. None when the
-    type is not a chain of that many binders (an mdata node, for one)."""
+    type is not a chain of that many binders (an mdata node, for one), or when finding which fields
+    are dependent takes more steps than the budget (a fresh Budget unless one is given) has left."""
     d = env._decls[env._decl(ctor)]
     if d.kind != 'ctor':
         raise ExportError('%s is not a constructor' % str(ctor)[:200])
@@ -584,9 +561,14 @@ def fields(env, ctor):
         if i >= params:
             pre, comp = env._parts[binder] if binder != 0 else (None, None)
             plain = pre == 0 and type(comp) is str and _escape(comp) == comp and '»' not in comp
-            out.append((comp if plain else None, info, env._mentions_bvar(body)))
+            out.append((comp if plain else None, info, body))
         e = body
-    return out
+    budget = Budget() if budget is None else budget
+    try:
+        _loose(env, d.fields['type'], budget)
+    except OutOfSteps:
+        return None
+    return [(name, info, bool(budget.loose[body] & 1)) for name, info, body in out]
 
 
 # The binder chains a declaration starts with: its type's foralls, its value's lambdas.

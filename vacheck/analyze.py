@@ -22,7 +22,7 @@ import re
 import stat
 
 from . import VERSION
-from .export import (ExportError, axioms_of, constants_in_type, constructors, digest, fields, parameters,
+from .export import (Budget, ExportError, axioms_of, constants_in_type, constructors, digest, fields, parameters,
                      value_constants)
 from .manifest import _STRIP
 from .result import ALLOWED_AXIOMS, SCHEMA, ResultError, describe, hidden_character, validate_result
@@ -511,14 +511,15 @@ def _unwrap(part):
     return part
 
 
-def _constructor(export, ctor, text):
+def _constructor(export, ctor, text, budget=None):
     """A constructor as Lean's #print shows one: its name, then (field : type) for each field, then the
     type it makes, from nanoda_bin's `constructor <name> : <type> -> ... -> <type>` and the fields'
     names in the export. As nanoda_bin prints it, without the keyword, when that is not certain: a
-    parameter, a field another depends on, a field that is not explicit or has no plain name."""
+    parameter, a field another depends on, a field that is not explicit or has no plain name, or
+    fields past the budget."""
     shown = text[len('constructor '):] if text.startswith('constructor ') else text
     name, sep, rest = shown.partition(' : ')
-    fs = fields(export, ctor)
+    fs = fields(export, ctor, budget)
     if not sep or not fs or parameters(export, ctor) or re.search(r'[\s(){}\[\]⦃]', name) \
             or not all(f is not None and info == 'default' and not dep for f, info, dep in fs):
         return shown
@@ -549,7 +550,8 @@ def _definition(export, name, printed, ctors):
     text = printed[name]
     kind = export.kind(name)
     if kind == 'inductive':
-        lines = [_constructor(export, c, printed[c]) for c in ctors[name]]
+        budget = Budget()  # one for all its constructors, so their number does not multiply it
+        lines = [_constructor(export, c, printed[c], budget) for c in ctors[name]]
         if not lines:
             return text, None
         out = text + '\n' + ('constructor:' if len(lines) == 1 else 'constructors:')
