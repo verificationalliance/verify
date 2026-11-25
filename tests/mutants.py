@@ -9,8 +9,10 @@ line, by tests/test_cli.py, which builds and runs them (it needs the toolchain, 
 
     python3 -I tests/mutants.py
 
-prints `mutants: n/N caught`, and exits 1 when one survives, when its text is not in its file exactly
-once, or when the unchanged copy fails.
+prints `mutants: n/N caught`, and exits 1 when one is not caught, when its text is not in its file
+exactly once, or when the unchanged copy fails. A mutant is caught only when a check prints FAIL: a
+test script that crashes or runs out of time proves nothing about the rule, and is reported as
+`crashed` or `timed out`, not caught.
 """
 import os
 import shutil
@@ -214,10 +216,18 @@ def main():
                 code, first = run(repo, test)
             finally:
                 shutil.rmtree(tmp)
-            check('%s is caught' % what, code != 0)
-            if code != 0:
+            if first is not None and code not in (0, 'timeout'):
+                status = 'caught'
+            elif code == 'timeout':
+                status = 'timed out'
+            else:
+                status = 'crashed' if code != 0 else 'survived'
+            check('%s is caught' % what, status == 'caught')
+            if status == 'caught':
                 caught += 1
-                print('      by %s' % (first or 'exit %s' % code))
+                print('      by %s' % first)
+            else:
+                print('      %s (exit %s)' % (status, code))
     print('mutants: %d/%d caught' % (caught, total))
     return 1 if failures else 0
 
