@@ -3,6 +3,8 @@
 # `dotlake`, a project with its .lake folder committed, must fail in `build`, before building.
 # The run as a whole shows as failed, because they do; the assert jobs are the verdict. Two calls
 # sign here, so the run's osva-proof-result is either one's: both are this repository and commit.
+# `good`'s export is then checked again as our re-check checks one, by the check action in a job of
+# its own, with the export downloaded from this run by its id: both must give the same result.json.
 name: selftest
 
 on:
@@ -90,6 +92,55 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+
+  # good's export, checked again as our re-check checks a developer's: this commit's check action,
+  # in a job of its own, with the export of good's build downloaded from this run, by its id,
+  # through the API.
+  good-again:
+    needs: good
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      result: ${{ steps.check.outputs.result }}
+    steps:
+      - name: Check out the action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check good's export from this run, by its id
+        id: check
+        uses: ./.github/actions/check
+        with:
+          manifest: tests/fixtures/good/.verificationalliance.json
+          repository: ${{ github.repository }}
+          commit: ${{ github.sha }}
+          export-run-id: ${{ github.run_id }}
+          export-repository: ${{ github.repository }}
+
+  # Two honest checks of one export must give the same bytes: a re-check that gave others would
+  # refuse an honest result.
+  byte-identical:
+    needs: [good, good-again]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - name: good's check and its check again gave the same result.json
+        env:
+          FIRST: ${{ needs.good.outputs.result }}
+          AGAIN: ${{ needs.good-again.outputs.result }}
+        run: |
+          test -n "$FIRST"
+          test "$FIRST" = "$AGAIN"
+          echo "Both checks gave result.json with sha256 $(printf '%s' "$FIRST" | base64 -d | sha256sum | cut -d ' ' -f 1)."
 
   assert:
     needs: [good, println, sorry, fakeeq, native, axiom, forge, dotlake]
