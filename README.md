@@ -47,7 +47,7 @@ permissions:
   contents: read
 jobs:
   verify:
-    uses: verificationalliance/verify/.github/workflows/lean.yml@d71d686908e66e2bccfda881a7c182aa45de4aae # workflow-9
+    uses: verificationalliance/verify/.github/workflows/lean.yml@6fdf9a0870d09204e776d2fc357d96acb3258eb8 # workflow-10
     permissions:
       contents: read
       id-token: write
@@ -83,17 +83,17 @@ repository, or to nothing is refused.
 
 Pin the workflow by its full commit SHA, as above. The current release:
 
-- **workflow-9**, `d71d686908e66e2bccfda881a7c182aa45de4aae`, with vacheck 2.0.1 and result schema v2
+- **workflow-10**, `6fdf9a0870d09204e776d2fc357d96acb3258eb8`, with vacheck 2.0.2 and result schema v2
   (`https://verificationalliance.org/attestations/proof-check/v2`, also the attestation's predicate
-  type): each claim carries the sanity checks' warnings, and `sanity` says whether they all ran.
+  type): each claim carries the sanity checks' warnings, and `sanity` says how far they got.
   Its check job runs the check action `.github/actions/check` of this repository, pinned at
-  `cb64d5c`, and the export is kept 7 days.
+  `e857d7a`, and the export is kept 7 days.
 
 Superseded, still accepted for now: workflow-7 (`ba4c212`, vacheck 1.1.4, schema v1) and workflow-6
-(`6512d67`, vacheck 1.1.4, schema v1). Move to workflow-9.
+(`6512d67`, vacheck 1.1.4, schema v1). Move to workflow-10.
 
 Revoked: workflow-1 (`f209d20`), workflow-2 (`4e66300`), workflow-3 (`7896c82`), workflow-4
-(`7b47c83`, never used), workflow-5 (`9ade54f`) and workflow-8 (`8ebc4dc`, never used). Their tags stay as history; a result one of them signed shows as needing a
+(`7b47c83`, never used), workflow-5 (`9ade54f`), workflow-8 (`8ebc4dc`, never used) and workflow-9 (`d71d686`, never used). Their tags stay as history; a result one of them signed shows as needing a
 new check until the workflow runs again on the current release.
 
 Check the parsers locally: `python3 -I tests/test_vacheck.py`
