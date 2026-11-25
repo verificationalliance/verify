@@ -1,0 +1,5 @@
+name = "printed"
+defaultTargets = ["Printed"]
+
+[[lean_lib]]
+name = "Printed"

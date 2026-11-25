@@ -729,13 +729,13 @@ HYG = ('x', '_@', 'M', '_hyg', 1)  # a name with macro scopes, as `x✝` is
 b = Build()
 PROP, FALSE, INTRO = b.expr('sort', 0), b.const('False'), b.const('True', 'intro')
 # leanexport shares one expression among those equal but for binder names and info, so a definition's
-# type may carry other binders than its value, and the page prints the type's. P's type is
-# ∀ (n : Nat) (x✝ : Nat) {m : Nat}, Prop; its value, fun (m : Nat) (n : Nat) (q : Nat) => m, ignores
-# its second argument (x✝ on the page) and its third, which is implicit.
-b.define('P', chain(b, 'forallE', [(('n',), 'default'), (HYG, 'default'), (('m',), 'implicit')], PROP),
+# type may carry another declaration's binder names. P's type is ∀ (n : Nat) (k : Nat) {m : Nat}, Prop;
+# its value, fun (m : Nat) (n : Nat) (q : Nat) => m, ignores its second argument, which the type calls k
+# and the value n, and its third, which the type makes implicit.
+b.define('P', chain(b, 'forallE', [(('n',), 'default'), (('k',), 'default'), (('m',), 'implicit')], PROP),
          chain(b, 'lam', [(('m',), 'default'), (('n',), 'default'), (('q',), 'default')], b.expr('bvar', 2)))
-# Q : ∀ (p.q : Nat), Prop := fun y => False ignores p.q, a binder name of two components.
-b.define('Q', chain(b, 'forallE', [(('p', 'q'), 'default')], PROP), chain(b, 'lam', [(('y',), 'default')], FALSE))
+# Q : ∀ (p.q : Nat), Prop := fun p.q => False ignores p.q, a binder name of two components.
+b.define('Q', chain(b, 'forallE', [(('p', 'q'), 'default')], PROP), chain(b, 'lam', [(('p', 'q'), 'default')], FALSE))
 b.define('U', b.expr('sort', b.param('u')), b.const('True'), params=('u',))  # U.{u} : Sort u
 # t (a : Nat) {b : Nat} (c : Nat) (d : Nat) : Q a := fun a b r s => True.intro s. The proof uses only d,
 # and the statement only a: c is the one assumption the proof never uses (the proof calls it r).
@@ -764,7 +764,7 @@ T_WANT = [('holds-for-any', 'P', None), ('ignores-argument', 'Q', 'p.q'), ('igno
           ('unused-assumption', 'c', None)]
 check('sanity: targets drop a definition with universe parameters, and a name that is not a def',
       attempt(lambda: sanity.targets(shapes, ['t'], {'t': ['Q', 'U', 'P', 'Nat']})) == [('t', ('Q', 'P'))])
-check("sanity: an argument's name and explicitness come from the definition's type, its use from the value",
+check("sanity: an argument's explicitness comes from the definition's type, its use from the value, its name from both",
       attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'])) == T_WANT)
 check('sanity: an assumption is judged only when the rest of the statement does not mention it',
       attempt(lambda: [w for w in got('t', set(), shapes, ['Q']) if w[0] == 'unused-assumption'])
@@ -774,15 +774,26 @@ check("sanity: a let's body is under one more binder",
       == ([('no-project-definition', None, None)],
           [('no-project-definition', None, None), ('unused-assumption', 'x', None)]))
 asked = []
-check('sanity: a name the page does not show is None, and only warned names are asked about',
-      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'], shown=lambda n: asked.append(n) or n != 'c'))
-      == T_WANT[:3] + [('unused-assumption', None, None)] and asked == ['p.q', 'c'])
+check("sanity: an assumption's name the page does not show is None, and only those warned of are asked about",
+      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'], shown=lambda d, n: asked.append((d, n)) or n != 'c'))
+      == T_WANT[:3] + [('unused-assumption', None, None)] and asked == [('t', 'c')])
 asked_names = []
 check('sanity: a name over 200 characters, or with a character a report cannot show, is None',
-      attempt(lambda: got('names', set(), shapes, [], shown=lambda n: asked_names.append(n) or True))
+      attempt(lambda: got('names', set(), shapes, [], shown=lambda d, n: asked_names.append(n) or True))
       == [('no-project-definition', None, None), ('unused-assumption', 'a' * 200, None),
           ('unused-assumption', None, None), ('unused-assumption', None, None), ('unused-assumption', 'ok', None)]
       and asked_names == ['a' * 200, 'ok'])
+
+# The printed fixture, exported by Lean: leanexport gave P2's and P4's types the binder names of a shared
+# expression, (n x✝ : Nat), while nanoda_bin prints their values, fun {α} (m n : Nat) => n > 0. Pos's type
+# is printed (n a✝ : Nat), its value fun m n => m > 0.
+PR = attempt(lambda: vx.load_export(os.path.join(FIXTURES, 'printed.ndjson')))
+check('sanity: an argument whose type and value name it differently is not named (P2, P4, Pos)',
+      [attempt(lambda t=t, d=d: got(t, set(), PR, [d])) for t, d in (
+          ('Printed.u2', 'Printed.P2'), ('Printed.u4', 'Printed.P4'), ('Printed.pos', 'Printed.Pos'))]
+      == [[('ignores-argument', d, None)] for d in ('Printed.P2', 'Printed.P4', 'Printed.Pos')])
+check("sanity: an argument whose type and value name it alike is named (Weak.Safe's p)",
+      attempt(lambda: [vx.binder_name(W, a) for a in sanity._ignored(W, 'Weak.Safe', vx.Budget())]) == ['p'])
 
 
 def with_steps(n, fn):

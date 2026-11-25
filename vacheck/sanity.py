@@ -13,12 +13,14 @@ verdict, from the helper vacheck/sanity.lean:
   the proof's matching lambda mentions. A proof that is not a lambda, or has fewer lambdas, is not
   judged past them.
 
-Names are as the page prints them. It prints a declaration's binders with its type's names, which
-may not be its value's own: leanexport shares one expression among those equal but for binder names
-and binder info. So a binder's name and explicitness come from the type, and its use from the value.
-A binder name the page may not show (none, macro scopes, over MAX_NAME characters, a character a
-report cannot show, or one the caller's `shown` rejects) is None, and the report says "one of its
-...". The binder walks of one claim share an export.Budget; past it, the claim gets no warning read
+Names are as the page prints them. leanexport shares one expression among those equal but for binder
+names and binder info, so a declaration's type may carry another declaration's binder names, and
+nanoda_bin prints a definition under its type's names (`def Pos (n a✝ : Nat)`) or, when it has an
+implicit or instance argument, as `fun` over its value's (`fun {α} (m n : Nat) =>`). So a binder's
+explicitness comes from the type and its use from the value, and an argument is named only when its
+type and value name it alike. A binder name the page may not show (none, macro scopes, over MAX_NAME
+characters, a character a report cannot show, an argument named differently, or an assumption the
+caller's `shown` rejects) is None, and the report says "one of its ...". The binder walks of one claim share an export.Budget; past it, the claim gets no warning read
 off binders, as the helper skips a re-check out of heartbeats. Warnings never fail a check.
 
 The helper's verdicts are read as strictly as the export: anything but one well-formed verdict per
@@ -86,8 +88,9 @@ def warnings(export, theorem, defs, any_defs, shown=None):
     defs or of the statement's binders, and at most MAX_WARNINGS.
 
     defs are the project's definitions in the statement, as analyze lists them; any_defs, those of
-    them the helper found the proof holds for any value of. shown, when given, takes a binder's name
-    and says whether the page shows it; it is asked only about the names the warnings would give.
+    them the helper found the proof holds for any value of. shown, when given, takes the theorem and
+    the name of one of its statement's binders, and says whether the page shows that name; it is asked
+    only about the assumptions the warnings would name.
     """
     if not set(any_defs) <= set(defs):
         raise SanityError('a verdict names a definition the statement does not mention')
@@ -104,16 +107,17 @@ def warnings(export, theorem, defs, any_defs, shown=None):
         found['ignores-argument'] = found['unused-assumption'] = []
     kept = [(check, name, arg) for check in CHECKS for name, arg in found[check]][:MAX_WARNINGS]
     return [{'check': check,
-             'name': _named(export, name, shown) if check == 'unused-assumption' else name,
-             'arg': _named(export, arg, shown) if check == 'ignores-argument' else arg}
+             'name': _named(export, name, shown, theorem) if check == 'unused-assumption' else name,
+             'arg': _named(export, arg) if check == 'ignores-argument' else arg}
             for check, name, arg in kept]
 
 
 def _ignored(export, d, budget):
-    """The explicit arguments of definition d that its value never uses, as binder handles: named and
-    made explicit by d's type, used or not by its value."""
-    uses = binder_uses(export, d, 'value', budget)
-    return [arg for (arg, arg_info), arg_used in zip(binder_chain(export, d, 'type'), uses)
+    """The explicit arguments of definition d that its value never uses, as binder handles: made
+    explicit by d's type, used or not by its value, and None when the two name it differently."""
+    params, uses = binder_chain(export, d, 'value'), binder_uses(export, d, 'value', budget)
+    return [arg if arg == param else None
+            for (arg, arg_info), (param, _), arg_used in zip(binder_chain(export, d, 'type'), params, uses)
             if arg_info == 'default' and not arg_used]
 
 
@@ -132,12 +136,12 @@ def _unused(export, theorem, budget):
     return [statement[k][0] for k in unused if not stated[k]]
 
 
-def _named(export, binder, shown):
-    """A binder's name for a warning, or None when it has no plain name, is longer than MAX_NAME,
-    holds a character a report cannot show, or shown says the page does not show it."""
+def _named(export, binder, shown=None, declaration=None):
+    """A binder's name for a warning, or None when there is none, it has no plain name, is longer
+    than MAX_NAME, holds a character a report cannot show, or shown(declaration, name) is false."""
     # Imported here, not above: the result contract reads CHECKS from this module.
     from .result import hidden_character
-    name = binder_name(export, binder)
+    name = None if binder is None else binder_name(export, binder)
     if name is None or len(name) > MAX_NAME or hidden_character(name) is not None:
         return None
-    return name if shown is None or shown(name) else None
+    return name if shown is None or shown(declaration, name) else None
