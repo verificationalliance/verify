@@ -366,13 +366,14 @@ def sanity_targets(case):
                '--manifest', os.path.join(FIXTURES, case, '.verificationalliance.json'))
 
 
-def helper(targets, export):
-    """The helper on a targets file and an export, with only what the sandbox passes on; None if it was
-    not built."""
-    if SANITY is None:
+def helper(targets, export, exe=None):
+    """The helper (or the build `exe` of it) on a targets file and an export, with only what the sandbox
+    passes on; None if it was not built."""
+    exe = exe or SANITY
+    if exe is None:
         return None
     start = time.monotonic()
-    p = subprocess.run([SANITY, targets, export], capture_output=True, stdin=subprocess.DEVNULL, cwd=TMP,
+    p = subprocess.run([exe, targets, export], capture_output=True, stdin=subprocess.DEVNULL, cwd=TMP,
                        env={'HOME': TMP, 'PATH': '/usr/bin:/bin', 'LEAN_SYSROOT': LEAN_TOOLCHAIN,
                             'LEAN_ABORT_ON_PANIC': '1'})
     print('      the helper took %.2f s' % (time.monotonic() - start))
@@ -499,6 +500,39 @@ h = helper(write(fresh('reach-all.jsonl'), '[0,1,["Reach","safe"],["Reach","thre
                                            '[1,1,["Reach","even_two"],["Reach","odd"]]\n'), REACH)
 check('sanity helper: given them, the kernel accepts safe whatever threshold is, and even_two whatever odd is',
       h is not None and h.code == 0 and h.out == '0 1 any\n1 1 any\n')
+
+# Heartbeats. The kernel counts them per thread, and the replay spends many on the main one, so each
+# re-check runs as a task of its own, with a full budget. Copies of the helper with 500k heartbeats a
+# re-check judge budget's light, whose re-check costs 350k to 400k, and heavy, 600k to 700k.
+BUDGET = os.path.join(FIXTURES, 'budget.ndjson')
+LIGHT, HEAVY = '[0,0,["Budget","light"],["Budget","tag"]]\n', '[1,0,["Budget","heavy"],["Budget","tag"]]\n'
+h = helper(write(fresh('budget-targets.jsonl'), LIGHT + HEAVY), BUDGET)
+check('sanity helper: light and heavy hold whatever tag is', h is not None and h.code == 0 and h.out == '0 0 any\n1 0 any\n')
+
+
+def helper_with(*replacements):
+    """The helper built from sanity.lean with each (old, new) made; old must be there exactly once."""
+    source = packaged.decode('utf-8') if packaged else ''
+    for old, new in replacements:
+        if source.count(old) != 1:
+            print('      %r is not in sanity.lean exactly once' % old)
+            return None
+        source = source.replace(old, new)
+    return build_helper(source)
+
+
+PER_CHECK = ('def heartbeats : Nat := 200000', 'def heartbeats : Nat := 500')
+small = helper_with(PER_CHECK)
+h = small and helper(write(fresh('light3.jsonl'), LIGHT * 3), BUDGET, small)
+check('sanity helper with 500k heartbeats a re-check: light, three times, fits each time',
+      h is not None and h.code == 0 and h.err == '' and h.out == '0 0 any\n' * 3)
+h = small and helper(write(fresh('heavy.jsonl'), HEAVY), BUDGET, small)
+check('sanity helper with 500k heartbeats a re-check: heavy does not fit, skipped with exit 0',
+      h is not None and h.code == 0 and h.err == '' and h.out == '1 0 skipped\n')
+spent = helper_with(PER_CHECK, ('def totalHeartbeats : Nat := 1000000', 'def totalHeartbeats : Nat := 1'))
+h = spent and helper(write(fresh('light3.jsonl'), LIGHT * 3), BUDGET, spent)
+check('sanity helper with a total of 1k heartbeats: the first re-check spends it, the rest are skipped',
+      h is not None and h.code == 0 and h.err == '' and h.out == '0 0 any\n0 0 skipped\n0 0 skipped\n')
 
 
 # The printer: nanoda reads names by splitting them at dots, so a name it would read as another one

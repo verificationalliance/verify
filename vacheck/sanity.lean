@@ -17,20 +17,36 @@ writes it: two indices, then two names as the JSON arrays of their components (a
   definition and `p : S` the theorem. The claim holds whatever `X` is.
 - `needed`: the kernel rejects it.
 - `skipped`: no verdict. The theorem is not a theorem of the export, or the definition is not a
-  definition without universe parameters, or the export does not replay, or the re-check ran out of
-  heartbeats.
+  definition without universe parameters, or the export does not replay, or the re-check reached a
+  limit (its heartbeats, the kernel's recursion depth or memory, an interrupt), or the re-checks
+  before it spent `totalHeartbeats`.
 
 It exits 0 with one verdict per line, or 1 with one line on stderr when a file cannot be read or a
 line of TARGETS is not of that shape. Names cross only as data; the output holds only indices.
 
 It ships inside vacheck.pyz (`vacheck sanity-source` prints it). The check job compiles it with the
-project's toolchain, `lean -c`, then `leanc -lLeanExport`, and runs it in the sandbox.
+project's toolchain, `lean -c`, then `leanc -lLeanExport`, and runs it in the sandbox, under a
+wall-clock limit of 30 minutes and a memory cap of 8 GiB; the cap is a cgroup's `memory.max`, since
+under an address-space limit (`ulimit -v`, even 4 GiB) the Lean runtime cannot start its threads. A
+helper stopped there, or one that exits with anything but 0, is read as every pair skipped
+(`vacheck analyze --sanity-stopped`): the sanity step never fails a check.
 -/
 
 open Lean
 
-/-- The kernel heartbeats (in thousands) one re-check may use: Lean's default. -/
+/-- The kernel heartbeats, in thousands, one re-check may use: Lean's default `maxHeartbeats`. The
+kernel counts them itself, one per step of its type checker, and stops the re-check past them. -/
 def heartbeats : Nat := 200000
+
+/-- The kernel's recursion depth for a re-check: Lean's default `maxRecDepth` (the kernel allows 16
+times as deep). -/
+def recDepth : Nat := 512
+
+/-- The heartbeats, in thousands, that the re-checks together may use, as `IO.getNumHeartbeats`
+counts them: small allocations, about four per kernel heartbeat. Once the re-checks so far have
+spent them, every pair left is skipped, so the count is the same on every run. A million is about
+two minutes of re-checking on v4.36.0, and the last re-check may spend up to `heartbeats` past it. -/
+def totalHeartbeats : Nat := 1000000
 
 /-- A name from the JSON array of its components: strings for `Name.str`, numbers for `Name.num`.
 As `nameOf` in the action's Reference.lean. -/
@@ -109,26 +125,42 @@ def freshName (env : Kernel.Environment) : Name := Id.run do
     n := .num `_vacheck_sanity k
   return n
 
-/-- The verdict on one pair, the re-checked theorem named `name`. The re-check runs as a task of
-its own, so that it starts with no heartbeats spent: the kernel counts them per thread, without
-reset, and the replay spent many on this one. -/
-def verdict (map : Std.HashMap Name ConstantInfo) (env : Kernel.Environment) (name : Name) (t : Target) :
-    String := Id.run do
-  let some (.thmInfo thm) := map[t.thm]? | return "skipped"
-  let some (.defnInfo d) := map[t.defn]? | return "skipped"
-  unless d.levelParams.isEmpty do return "skipped"
+/-- The pair's re-check, the theorem `∀ x : τ, S[x/X] := fun x => p[x/X]` named `name`; none when the
+theorem is not a theorem of the export, or the definition not a definition without universe
+parameters. -/
+def recheckOf (map : Std.HashMap Name ConstantInfo) (name : Name) (t : Target) : Option Declaration := do
+  let .thmInfo thm ← map[t.thm]? | none
+  let .defnInfo d ← map[t.defn]? | none
+  unless d.levelParams.isEmpty do none
   -- The replay accepted the theorem, so its terms hold no free variable that x could capture.
   let x := Expr.fvar ⟨`_vacheck_x⟩
   let abstracted (e : Expr) := (e.replace fun e => if e.isConstOf d.name then some x else none).abstract #[x]
-  let decl := Declaration.thmDecl {
+  return .thmDecl {
     name, levelParams := thm.levelParams,
     type := .forallE `x d.type (abstracted thm.type) .default,
     value := .lam `x d.type (abstracted thm.value) .default }
-  let opts := maxHeartbeats.set {} heartbeats
-  match (Task.spawn fun _ => Kernel.Environment.addDecl env opts decl).get with
-  | .ok _ => "any"
-  | .error .deterministicTimeout => "skipped"
-  | .error _ => "needed"
+
+/-- The verdict of the kernel on a re-check, and the heartbeats it spent as `IO.getNumHeartbeats`
+counts them.
+
+It runs as a task of its own. The kernel's count of its heartbeats, which `heartbeats` bounds, is
+kept per thread and set to zero only as a task starts (`run_task` in the runtime, in v4.35.0 and
+v4.36.0): never on the main thread, where the replay spent many. So every re-check has the whole
+budget, however many ran before it. `IO.getNumHeartbeats` counts on, through tasks and threads alike,
+so the task reads it before and after. -/
+def recheck (env : Kernel.Environment) (decl : Declaration) : IO (String × Nat) := do
+  let opts := maxRecDepth.set (maxHeartbeats.set {} heartbeats) recDepth
+  let task ← IO.asTask do
+    let before ← IO.getNumHeartbeats
+    let result ← IO.lazyPure fun _ => (Kernel.Environment.addDecl env opts decl).map fun _ => ()
+    let spent := (← IO.getNumHeartbeats) - before
+    return match result with
+      | .ok () => ("any", spent)
+      -- Limits, not answers: the kernel gave up.
+      | .error .deterministicTimeout | .error .deepRecursion | .error .excessiveMemory
+      | .error .interrupted => ("skipped", spent)
+      | .error _ => ("needed", spent)
+  IO.ofExcept (← IO.wait task)
 
 /-- A message as one line of printable ASCII, at most 300 characters: each run of white space as
 one space, any other character outside ASCII's printable ones as `\u{hex}`. -/
@@ -151,10 +183,19 @@ def run (targetsFile exportFile : String) : IO Unit := do
   if targets.isEmpty then return
   -- A failed replay is no verdict on any pair.
   let env? ← try pure (some (← replayExport exp.constMap)) catch _ => pure none
-  let judge := match env? with
-    | some env => verdict exp.constMap env (freshName env)
-    | none => fun _ => "skipped"
-  IO.print (String.join (targets.toList.map fun t => s!"{t.i} {t.j} {judge t}\n"))
+  let name := env?.map freshName
+  let mut out := ""
+  let mut spent := 0  -- as IO.getNumHeartbeats counts
+  for t in targets do
+    let mut verdict := "skipped"
+    if let (some env, some name) := (env?, name) then
+      if let some decl := recheckOf exp.constMap name t then
+        if spent < totalHeartbeats * 1000 then
+          let (v, used) ← recheck env decl
+          verdict := v
+          spent := spent + used
+    out := out ++ s!"{t.i} {t.j} {verdict}\n"
+  IO.print out
 
 def main (args : List String) : IO UInt32 := do
   try

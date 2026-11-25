@@ -31,3 +31,4 @@ export_case replaced Replaced Replaced.doubleImpl Replaced.double Replaced.doubl
 export_case weak Weak Weak.prog_safe Weak.sort_example Weak.add_zero_of_valid Weak.sort_length_self Weak.vacuous Weak.no_project Weak.arrow Weak.by_lemma
 export_case printed Printed Printed.pos Printed.u2 Printed.u4 Printed.t5
 export_case reach Reach Reach.safe Reach.even_two
+export_case budget Budget Budget.light Budget.heavy
