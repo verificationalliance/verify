@@ -40,7 +40,7 @@ permissions:
   contents: read
 jobs:
   verify:
-    uses: verificationalliance/verify/.github/workflows/lean.yml@ba4c212aefe24cded13faa30f781c4197751c8b9 # workflow-7
+    uses: verificationalliance/verify/.github/workflows/lean.yml@8ebc4dc77ec5437cd4d177da35371030a01c942f # workflow-8
     permissions:
       contents: read
       id-token: write
@@ -76,11 +76,13 @@ repository, or to nothing is refused.
 
 Pin the workflow by its full commit SHA, as above. The current release:
 
-- **workflow-7**, `ba4c212aefe24cded13faa30f781c4197751c8b9`, with vacheck 1.1.4. Its check job runs
-  the check action `.github/actions/check` of this repository, pinned at `3762b05`, and the export
-  is kept 7 days.
+- **workflow-8**, `8ebc4dc77ec5437cd4d177da35371030a01c942f`, with vacheck 2.0.0 and result schema v2
+  (`https://verificationalliance.org/attestations/proof-check/v2`, also the attestation's predicate
+  type): each claim carries the sanity checks' warnings. Its check job runs the check action
+  `.github/actions/check` of this repository, pinned at `fb43b21`, and the export is kept 7 days.
 
-Superseded: workflow-6 (`6512d67`, vacheck 1.1.4), still accepted for now. Move to workflow-7.
+Superseded, still accepted for now: workflow-7 (`ba4c212`, vacheck 1.1.4, schema v1) and workflow-6
+(`6512d67`, vacheck 1.1.4, schema v1). Move to workflow-8.
 
 Revoked: workflow-1 (`f209d20`), workflow-2 (`4e66300`), workflow-3 (`7896c82`), workflow-4
 (`7b47c83`, never used) and workflow-5 (`9ade54f`). Their tags stay as history; a result one of them signed shows as needing a
