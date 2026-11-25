@@ -335,7 +335,7 @@ def limited_problems(lines):
     first_tool = [i for i, c in enumerate(cmds) if c.startswith('limited "$va/sandbox" --ro "$va/vacheck.pyz"')]
     if not (len(test) == 1 and first_tool and test[0] < first_tool[0]
             and '|| limited "$va/sandbox" --ro "$probe/root-group" -- /bin/cat "$probe/root-group"' in cmds[test[0]]
-            and '"$va/probe.sh"' in cmds[test[0]] and cmds[test[0] + 2] == 'exit 1'):
+            and '-- /bin/bash "$probe/probe.sh" "$probe/given"' in cmds[test[0]] and cmds[test[0] + 2] == 'exit 1'):
         problems.append("limited's test of the groups does not come first, or does not fail the check")
     return problems
 
@@ -351,6 +351,9 @@ for what, old, new in (
         ('limited without the memory cap', '-p MemoryMax=8G -p MemorySwapMax=0', '-p MemorySwapMax=0'),
         ('limited without the deadline', ' -- timeout -k 10 "$left" "$@"', ' -- "$@"'),
         ('no test of the groups', '        if [[ " $(limited id -G) " != " $(id -g) " ]] \\\n', '        if false \\\n'),
+        ("the sandbox's test run from $RUNNER_TEMP, which binds it into the sandbox",
+         'limited "$va/sandbox" --ro "$probe/given" --ro "$probe/probe.sh" -- /bin/bash "$probe/probe.sh"',
+         'limited "$va/sandbox" --ro "$probe/given" --ro "$va/probe.sh" -- /bin/bash "$va/probe.sh"'),
         ('a test of the groups that does not fail the check',
          'or the sandbox does not isolate them."\n          exit 1', 'or the sandbox does not isolate them."\n          true')):
     broken = edited(old, new)

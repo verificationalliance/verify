@@ -594,13 +594,15 @@ runs:
         }
         # What runs under limited holds no group but this user's: not root's, which could read every
         # file of / that root's group may. Its groups, then a file of root's group, mode 0640, which
-        # the sandbox must not let it read; and the sandbox's own test, run under limited.
+        # the sandbox must not let it read; and the sandbox's own test, run under limited. From /tmp,
+        # as "Test the sandbox" runs it, so that nothing of $RUNNER_TEMP is bound into the sandbox.
         probe=$(mktemp -d)
+        cp "$va/probe.sh" "$probe/probe.sh"
         echo probe > "$probe/given"
         sudo install -o root -g root -m 640 "$probe/given" "$probe/root-group"
         if [[ " $(limited id -G) " != " $(id -g) " ]] \
             || limited "$va/sandbox" --ro "$probe/root-group" -- /bin/cat "$probe/root-group" > /dev/null 2>&1 \
-            || ! limited "$va/sandbox" --ro "$probe/given" --ro "$va/probe.sh" -- /bin/bash "$va/probe.sh" "$probe/given" \
+            || ! limited "$va/sandbox" --ro "$probe/given" --ro "$probe/probe.sh" -- /bin/bash "$probe/probe.sh" "$probe/given" \
               "$GITHUB_OUTPUT" "$GITHUB_ENV" "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$HOME"; then
           echo "::error::The sanity step's tools would hold another group than this user's, or the sandbox does not isolate them."
           exit 1
