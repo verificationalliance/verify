@@ -291,6 +291,54 @@ for what, old, new in (
 
 
 
+# limited, the sanity step's scope: as root, systemd-run makes the scope (8 GiB, no swap), then setpriv
+# makes the tool this user, with this user's group and no other (systemd-run --uid keeps root's), then
+# timeout ends it at the deadline. Its body is pinned, and its test comes before any tool runs under it.
+LIMITED = ['local left=$((deadline - SECONDS))', '(( left > 0 )) || return 124',
+           'sudo systemd-run --scope --quiet --collect -p MemoryMax=8G -p MemorySwapMax=0 -- setpriv '
+           '--reuid="$(id -u)" --regid="$(id -g)" --clear-groups -- timeout -k 10 "$left" "$@"']
+SANITY_STEP = 'Test which definitions each proof needs'
+
+
+def limited_problems(lines):
+    """What is wrong with limited and its test in the sanity step; [] if nothing."""
+    script = run_script(lines, SANITY_STEP)
+    if script is None:
+        return ['no sanity step']
+    problems = []
+    cmds = [' '.join(c.split()) for c in commands(script)]
+    starts = [i for i, c in enumerate(cmds) if c == 'limited() {']
+    if len(starts) != 1 or sum('limited()' in c for c in cmds) != 1:
+        return ['limited is not defined once']
+    end = cmds.index('}', starts[0])
+    if cmds[starts[0] + 1:end] != LIMITED:
+        problems.append('limited is not as pinned')
+    test = [i for i, c in enumerate(cmds) if c.startswith('if [[ " $(limited id -G) " != " $(id -g) " ]]')]
+    first_tool = [i for i, c in enumerate(cmds) if c.startswith('limited "$va/sandbox" --ro "$va/vacheck.pyz"')]
+    if not (len(test) == 1 and first_tool and test[0] < first_tool[0]
+            and '|| limited "$va/sandbox" --ro "$probe/root-group" -- /bin/cat "$probe/root-group"' in cmds[test[0]]
+            and '"$va/probe.sh"' in cmds[test[0]] and cmds[test[0] + 2] == 'exit 1'):
+        problems.append("limited's test of the groups does not come first, or does not fail the check")
+    return problems
+
+
+check('limited is as pinned, and its test of the groups comes first and fails the check', limited_problems(action) == [])
+for what, old, new in (
+        ('limited keeping the groups', ' --clear-groups -- timeout', ' -- timeout'),
+        ('limited without setpriv', '-- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups -- timeout',
+         '-- timeout'),
+        ('limited by systemd-run --uid',
+         '            -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups -- timeout',
+         '            --uid="$(id -u)" --gid="$(id -g)" -- timeout'),
+        ('limited without the memory cap', '-p MemoryMax=8G -p MemorySwapMax=0', '-p MemorySwapMax=0'),
+        ('limited without the deadline', ' -- timeout -k 10 "$left" "$@"', ' -- "$@"'),
+        ('no test of the groups', '        if [[ " $(limited id -G) " != " $(id -g) " ]] \\\n', '        if false \\\n'),
+        ('a test of the groups that does not fail the check',
+         'or the sandbox does not isolate them."\n          exit 1', 'or the sandbox does not isolate them."\n          true')):
+    broken = edited(old, new)
+    check('... %s is found' % what, broken is not None and limited_problems(broken) != [])
+
+
 # scripts/release.sh, in a repository of its own: this checkout's history may be shallow.
 def git(*args):
     return subprocess.run(['git', '-C', REPO] + list(args), env=GIT_ENV, capture_output=True, text=True,

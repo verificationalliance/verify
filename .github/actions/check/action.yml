@@ -559,14 +559,19 @@ runs:
     # the claim says less than it reads, and its report says so. vacheck chooses the pairs
     # (sanity-targets) and reads the verdicts back; the helper is vacheck's own Lean program
     # (sanity-source), built with the toolchain as the reference program is. Both read the export,
-    # so both run in the sandbox, as this user, in a scope of their own with at most 8 GiB of memory
-    # and no swap, and both within 30 minutes. The cap is a cgroup's: under an address-space limit,
-    # the Lean runtime cannot start its threads. Their output goes to files, and their messages
-    # reach the log only through say.py.
-    # The sanity step never fails the check. Stopped by a limit, or failing in any way, it gives no
-    # verdict, and Analyze reads every pair as skipped (--sanity-stopped): the check passes or fails
-    # on the rest. Only a helper that exits 0 hands its verdicts on, and vacheck reads them as
-    # strictly as the export.
+    # so both run in the sandbox. The helper's limits are heartbeats, the same on every run (see
+    # vacheck/sanity.lean), so two honest checks of one export give the same verdicts. As a safety
+    # net, well above them, both run in a scope of their own (systemd-run, as root) with at most
+    # 8 GiB of memory and no swap, within 30 minutes; the cap is a cgroup's, since under an
+    # address-space limit the Lean runtime cannot start its threads. In the scope, setpriv makes
+    # them this user, with this user's group and no other: systemd-run --uid would keep root's
+    # group, and a tool with it could read every file of / that root's group may. A test of that
+    # comes first, and fails the check. Their output goes to files, and their messages reach the
+    # log only through say.py.
+    # Else the sanity step never fails the check. Stopped by the safety net, or failing in any way,
+    # it gives no verdict: Analyze reads every pair as skipped (--sanity-stopped), result.json says
+    # "sanity": "stopped", and the check passes or fails on the rest. Only a helper that exits 0
+    # hands its verdicts on, and vacheck reads them as strictly as the export.
     - name: Test which definitions each proof needs
       shell: bash --noprofile --norc -euo pipefail {0}
       env:
@@ -579,14 +584,28 @@ runs:
         manifest="$GITHUB_WORKSPACE/$MANIFEST"
         rm -f "$va/sanity-done"
         deadline=$((SECONDS + 1800))
-        # limited COMMAND ARG...: COMMAND as this user, in a scope of its own with at most 8 GiB of
-        # memory and no swap, stopped at the deadline.
+        # limited COMMAND ARG...: COMMAND in a scope of its own with at most 8 GiB of memory and no
+        # swap, as this user with this user's group only, stopped at the deadline.
         limited() {
           local left=$((deadline - SECONDS))
           (( left > 0 )) || return 124
           sudo systemd-run --scope --quiet --collect -p MemoryMax=8G -p MemorySwapMax=0 \
-            --uid="$(id -u)" --gid="$(id -g)" -- timeout -k 10 "$left" "$@"
+            -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups -- timeout -k 10 "$left" "$@"
         }
+        # What runs under limited holds no group but this user's: not root's, which could read every
+        # file of / that root's group may. Its groups, then a file of root's group, mode 0640, which
+        # the sandbox must not let it read; and the sandbox's own test, run under limited.
+        probe=$(mktemp -d)
+        echo probe > "$probe/given"
+        sudo install -o root -g root -m 640 "$probe/given" "$probe/root-group"
+        if [[ " $(limited id -G) " != " $(id -g) " ]] \
+            || limited "$va/sandbox" --ro "$probe/root-group" -- /bin/cat "$probe/root-group" > /dev/null 2>&1 \
+            || ! limited "$va/sandbox" --ro "$probe/given" --ro "$va/probe.sh" -- /bin/bash "$va/probe.sh" "$probe/given" \
+              "$GITHUB_OUTPUT" "$GITHUB_ENV" "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$HOME"; then
+          echo "::error::The sanity step's tools would hold another group than this user's, or the sandbox does not isolate them."
+          exit 1
+        fi
+        sudo rm -r "$probe"
         # stopped WHY LOG: the step ends here, without verdicts, saying LOG through say.py.
         stopped() {
           python3 -I "$va/say.py" "$va/vacheck.pyz" < "$2" || true
