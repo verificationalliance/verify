@@ -99,7 +99,7 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
                                         % (t, ax))
         # 5. The project's own constants in each type: those the library does not have.
         defs = project_constants(export, references, theorems)
-        pairs = sanity.targets(export, theorems, defs)
+        pairs = sanity.targets(export, theorems, defs, library)
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
     try:

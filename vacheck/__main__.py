@@ -157,7 +157,8 @@ def sanity_targets(args):
     theorems = [c.theorem for c in manifest.claims]
     check_theorems(export, theorems)
     try:
-        pairs = sanity.targets(export, theorems, project_constants(export, references, theorems))
+        library = frozenset().union(*(r.names() for r in references))
+        pairs = sanity.targets(export, theorems, project_constants(export, references, theorems), library)
         lines = [_json_line([i, j, list(name_components(export, t)), list(name_components(export, d))])
                  for i, (t, ds) in enumerate(pairs) for j, d in enumerate(ds)]
     except ExportError as e:

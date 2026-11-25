@@ -840,6 +840,17 @@ helpers = attempt(hb.env)
 check('sanity: a _unary or _mutual helper reaches the definition it serves',
       attempt(lambda: sanity.targets(helpers, ['t', 'u'], {'t': ['F', 'F._unary'], 'u': ['G', 'G._mutual']}))
       == [('t', ()), ('u', ())])
+# L : Nat := X, where L is a name of the toolchain's library: analyze has compared the export's L with
+# the toolchain's, which cannot name the project's X, so the walk takes no step from L.
+lb = Build()
+lb.define('X', lb.const('Nat'), lb.expr('natVal', '0'))
+lb.define('L', lb.const('Nat'), lb.const('X'))
+lb.theorem('t', lb.bind('forallE', ('x',), lb.const('L'), lb.const('X')), INTRO)
+lib_env = attempt(lb.env)
+check('sanity: targets take no step from a name of the library',
+      attempt(lambda: (sanity.targets(lib_env, ['t'], {'t': ['X']}),
+                       sanity.targets(lib_env, ['t'], {'t': ['X']}, frozenset({'L', 'Nat'}))))
+      == ([('t', ())], [('t', ('X',))]))
 # A theorem in a statement is one fact, whatever its proof: lem's proof names D, yet lem takes no step to
 # D. The members of an inductive block reach each other: I.a reaches D through I.b : D → I. And a name
 # that does not read back as itself (a component holding » and a dot, which Lean leaves as it is)

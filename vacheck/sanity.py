@@ -49,10 +49,11 @@ def source():
     return pkgutil.get_data(__name__, 'sanity.lean')
 
 
-def targets(export, theorems, defs):
+def targets(export, theorems, defs, library=frozenset()):
     """The pairs the helper re-checks: for each theorem, in order, the names in defs[theorem], in
     order, that are definitions without universe parameters and that no other constant of the
-    statement reaches (export.reaches).
+    statement reaches (export.reaches, which takes no step from a name in `library`, the
+    toolchain's).
 
     The helper replaces a definition only where the statement names it. Where another constant of
     the statement is made of it (`isHigh n := n > threshold` in `isHigh 20 = true`), the kernel may
@@ -62,7 +63,7 @@ def targets(export, theorems, defs):
     for t in theorems:
         stated = constants_in_type(export, t)
         out.append((t, tuple(d for d in defs[t] if export.kind(d) == 'def' and universe_params(export, d) == 0
-                             and not reaches(export, stated - {d}, d))))
+                             and not reaches(export, stated - {d}, d, library))))
     return out
 
 

@@ -529,14 +529,18 @@ def value_constants(env, name):
 _HELPERS = ('_mutual', '_unary')  # what Lean compiles well-founded recursion through
 
 
-def reaches(env, names, target):
+def reaches(env, names, target, library=frozenset()):
     """Whether one of `names` reaches `target`, by a path of one step or more. A step goes from a
     declaration to each constant that its type mentions, and its value unless it is a theorem (a
     proof changes no meaning); from a member of an inductive block to every other; from a definition
     to the others of its mutual block (`all`), which Lean compiles to helpers that name none of them;
     and from a `_mutual` or `_unary` helper to the definition it serves, whose body it holds but does
     not name. A name the export does not declare takes no step. One that is not a name of the export
-    at all counts as reaching: what it would reach is not known."""
+    at all counts as reaching: what it would reach is not known.
+
+    Nor does a name in `library`, the toolchain's: a declaration the toolchain's reference also
+    declares names only the toolchain's own names, once analyze has compared the two, so it reaches
+    nothing of the project's. That keeps the walk to the project's declarations."""
     goal = env._lookup(target)
     todo = [env._lookup(n) for n in names]
     if goal is None or None in todo:
@@ -548,6 +552,8 @@ def reaches(env, names, target):
         if c in stepped:
             continue
         stepped.add(c)
+        if library and env._render(c) in library:
+            continue
         d = env._decls.get(c)
         nxt = set()
         if d is not None:

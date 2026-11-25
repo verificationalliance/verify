@@ -54,7 +54,7 @@ MUTANTS = [
     # reaches, by each kind of step.
     (SANITY, 'targets keep a definition with universe parameters', " and universe_params(export, d) == 0", ""),
     (SANITY, 'targets keep a definition another constant of the statement reaches',
-     "\n                             and not reaches(export, stated - {d}, d)", ""),
+     "\n                             and not reaches(export, stated - {d}, d, library)", ""),
     (EXPORT, 'reach takes no step through values',
      "[d.fields['type']] if d.kind == 'theorem' else d.exprs()", "[d.fields['type']]"),
     (EXPORT, "reach steps through a theorem's value",
@@ -65,6 +65,8 @@ MUTANTS = [
      "nxt.update(d.fields['all'])", "nxt.update(())"),
     (EXPORT, 'reach takes no step from a _mutual or _unary helper to its definition',
      'if comp in _HELPERS and pre in env._decls:', 'if False:'),
+    (EXPORT, 'reach steps into the library',
+     "        if library and env._render(c) in library:\n            continue\n", ""),
     (EXPORT, 'a name the export does not have reaches nothing',
      "if goal is None or None in todo:\n        return True", "if goal is None or None in todo:\n        return False"),
     # Names as the page prints them.
