@@ -17,6 +17,8 @@ named None, and the report says "one of its ...". Warnings never fail a check. T
 are read as strictly as the export: anything but one well-formed verdict per pair, in order, is a
 SanityError, never fewer warnings.
 """
+import pkgutil
+
 from .export import binders, body_constant, ends_in_prop, universe_params
 
 # The most serious first: the order of a claim's warnings.
@@ -27,6 +29,12 @@ VERDICTS = ('any', 'needed', 'skipped')  # what the helper says of one (theorem,
 
 class SanityError(Exception):
     pass
+
+
+def source():
+    """The helper's Lean source, vacheck/sanity.lean, as bytes. pkgutil reads it through the module's
+    loader, so this works from inside vacheck.pyz too."""
+    return pkgutil.get_data(__name__, 'sanity.lean')
 
 
 def targets(export, theorems, defs):

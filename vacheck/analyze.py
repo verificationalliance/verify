@@ -69,12 +69,7 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         _shown(c.says, 'what the claim on %s says' % c.theorem)
     try:
         # 1. The claimed theorems exist, and are theorems.
-        for t in theorems:
-            kind = export.kind(t)
-            if kind is None:
-                raise AnalysisError('%s is not in the export' % t)
-            if kind != 'theorem':
-                raise AnalysisError('%s is %s, not a theorem' % (t, _KINDS.get(kind, kind)))
+        check_theorems(export, theorems)
         # 2. Every name the export shares with the toolchain's library is the library's own
         # declaration. A digest names the constants a declaration uses without covering them, so
         # every shared name is compared, not only those the claimed theorems mention.
@@ -100,8 +95,7 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
                     raise AnalysisError("%s depends on %s, which is not in the toolchain's reference"
                                         % (t, ax))
         # 5. The project's own constants in each type: those the library does not have.
-        defs = {t: sorted(c for c in constants_in_type(export, t) if c not in library)[:MAX_DEFS]
-                for t in theorems}
+        defs = project_constants(export, references, theorems)
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
 
@@ -204,6 +198,25 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     except ResultError as e:
         raise AnalysisError('the result is not valid: %s' % e) from None
     return result
+
+
+def check_theorems(export, theorems):
+    """AnalysisError unless each name is a theorem of the export."""
+    for t in theorems:
+        kind = export.kind(t)
+        if kind is None:
+            raise AnalysisError('%s is not in the export' % t)
+        if kind != 'theorem':
+            raise AnalysisError('%s is %s, not a theorem' % (t, _KINDS.get(kind, kind)))
+
+
+def project_constants(export, references, theorems):
+    """Each theorem -> the project's own constants that its type mentions, those that no reference
+    declares: sorted, and at most MAX_DEFS. These are a claim's `defs`, and the definitions the sanity
+    helper re-checks. ExportError if the export cannot be read."""
+    library = frozenset().union(*(r.names() for r in references))
+    return {t: sorted(c for c in constants_in_type(export, t) if c not in library)[:MAX_DEFS]
+            for t in theorems}
 
 
 # An import at the start of a line or after a comment, with its modifiers. Group 1 is the module's

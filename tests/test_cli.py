@@ -1,6 +1,7 @@
 """The command line, run as the workflow runs it: `python3 -I vacheck.pyz ...`, with the zipapp that
-scripts/build.sh builds for a release, on the fixtures, and with the real nanoda_bin of the v4.36.0
-toolchain (NANODA_BIN overrides where it is)."""
+scripts/build.sh builds for a release, on the fixtures, and with the real tools of the v4.36.0
+toolchain: its nanoda_bin (NANODA_BIN overrides where it is), and its lean and leanc to build the
+sanity helper (LEAN_TOOLCHAIN overrides where the toolchain is)."""
 import glob
 import hashlib
 import json
@@ -19,7 +20,9 @@ from vacheck.text import log_line  # noqa: E402
 FIXTURES = os.path.join(ROOT, 'tests', 'fixtures')
 NANODA = os.environ.get('NANODA_BIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0/bin/nanoda_bin')
-MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native'}
+LEAN_TOOLCHAIN = os.environ.get('LEAN_TOOLCHAIN') or os.path.expanduser(
+    '~/.elan/toolchains/leanprover--lean4---v4.36.0')
+MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak'}
 REPO, COMMIT = 'github.com/acme/proj', 'c' * 40
 TMP = tempfile.mkdtemp(prefix='test_cli-')
 
@@ -91,6 +94,7 @@ check('build.sh builds the same bytes every time',
 class Run:
     def __init__(self, proc):
         self.code = proc.returncode
+        self.raw = proc.stdout
         self.out = proc.stdout.decode('utf-8', errors='replace')
         self.err = proc.stderr.decode('utf-8', errors='replace')
 
@@ -162,8 +166,13 @@ def reference(case):
     """The toolchain's own export of the fixture's library names: the fixture's export without the
     declarations in its own namespace."""
     own = MODULES[case]
+    return export_without(case, lambda n: n == own or n.startswith(own + '.'), case + '-reference.ndjson')
+
+
+def export_without(case, drop, name):
+    """A copy of the fixture's export without the lines that declare a name for which drop is true."""
     names = {0: None}
-    path = fresh(case + '-reference.ndjson')
+    path = fresh(name)
     with open(os.path.join(FIXTURES, case + '.ndjson'), encoding='utf-8') as f, \
             open(path, 'w', encoding='utf-8') as out:
         for line in f:
@@ -176,7 +185,7 @@ def reference(case):
             decls = [names[o[k]['name']] for k in ('axiom', 'def', 'thm', 'opaque', 'quot') if k in o]
             if 'inductive' in o:
                 decls = [names[r['name']] for k in ('types', 'ctors', 'recs') for r in o['inductive'][k]]
-            if any(n == own or n.startswith(own + '.') for n in decls):
+            if any(drop(n) for n in decls):
                 continue
             out.write(line)
     return path
@@ -309,6 +318,103 @@ spaced = result_of(analyze('good', root=tree('good', (), raw=manifest(claims=goo
 check('the build digest covers the manifest file',
       'build_digest' in spaced and good_res.get('build_digest') not in (None, spaced['build_digest']))
 
+# sanity-source, sanity-targets, and the kernel helper they feed: built from sanity-source's output as
+# the action builds it (`lean -c`, then `leanc -lLeanExport`), and run with the environment the
+# sandbox gives it.
+SANITY_LEAN = os.path.join(ROOT, 'vacheck', 'sanity.lean')
+r = cli('sanity-source')
+packaged = attempt(lambda: open(SANITY_LEAN, 'rb').read())
+check('sanity-source prints the packaged sanity.lean', r.code == 0 and r.err == '' and r.raw and r.raw == packaged)
+
+
+def build_helper(source):
+    """The helper's path, compiled from source by the toolchain; None if it does not build."""
+    d = fresh('sanity')
+    write(os.path.join(d, 'Sanity.lean'), source)
+    start = time.monotonic()
+    for argv in ([os.path.join(LEAN_TOOLCHAIN, 'bin', 'lean'), '-c', 'sanity.c', 'Sanity.lean'],
+                 [os.path.join(LEAN_TOOLCHAIN, 'bin', 'leanc'), '-o', 'sanity', 'sanity.c', '-lLeanExport']):
+        p = attempt(lambda: subprocess.run(argv, cwd=d, capture_output=True, stdin=subprocess.DEVNULL))
+        if p is None or p.returncode != 0:
+            if p is not None:
+                print('      %s exits %d: %s' % (os.path.basename(argv[0]), p.returncode,
+                                                 (p.stdout + p.stderr).decode('utf-8', errors='replace')[-2000:]))
+            return None
+    print('      the helper builds in %.1f s' % (time.monotonic() - start))
+    return os.path.join(d, 'sanity')
+
+
+SANITY = build_helper(r.raw) if r.code == 0 and r.raw else None
+check('the helper builds with %s' % LEAN_TOOLCHAIN, SANITY is not None)
+
+
+def sanity_targets(case):
+    return cli('sanity-targets', '--export', os.path.join(FIXTURES, case + '.ndjson'), '--reference', REFS[case],
+               '--manifest', os.path.join(FIXTURES, case, '.verificationalliance.json'))
+
+
+def helper(targets, export):
+    """The helper on a targets file and an export, with only what the sandbox passes on; None if it was
+    not built."""
+    if SANITY is None:
+        return None
+    start = time.monotonic()
+    p = subprocess.run([SANITY, targets, export], capture_output=True, stdin=subprocess.DEVNULL, cwd=TMP,
+                       env={'HOME': TMP, 'PATH': '/usr/bin:/bin', 'LEAN_SYSROOT': LEAN_TOOLCHAIN,
+                            'LEAN_ABORT_ON_PANIC': '1'})
+    print('      the helper took %.2f s' % (time.monotonic() - start))
+    return Run(p)
+
+
+TARGETS = {case: sanity_targets(case) for case in ('good', 'weak')}
+good_lines = TARGETS['good'].out.split('\n')
+check('sanity-targets names a guillemet theorem by its components',
+      TARGETS['good'].code == 0 and TARGETS['good'].err == '' and len(good_lines) > 2
+      and good_lines[1] == '[1,0,["Good","key never leaves"],["Good","f"]]')
+TARGET_FILES = {case: write(fresh(case + '-targets.jsonl'), t.raw) for case, t in TARGETS.items()}
+for case, want in (('weak', '0 0 needed\n0 1 any\n1 0 needed\n1 1 needed\n2 0 any\n3 0 any\n4 0 any\n6 0 any\n'),
+                   ('good', '0 0 any\n1 0 needed\n2 0 needed\n3 0 any\n3 1 needed\n')):
+    h = helper(TARGET_FILES[case], os.path.join(FIXTURES, case + '.ndjson'))
+    check('sanity helper: %s verdicts' % case, h is not None and h.code == 0 and h.err == '' and h.out == want)
+    if h is not None and h.out != want:
+        print('      exit %s, stdout %r, stderr %r' % (h.code, h.out, h.err))
+
+
+def string_literal_export():
+    """An export of a theorem whose proof reduces a string literal. The kernel unfolds one to
+    String.ofList [Char.ofNat n, ...], which no declaration names, so a replay in the order of what
+    each declaration names can check the theorem first and reject it: leanchecker --from-export
+    does, on v4.35.0 and v4.36.0 (lean4#15853). None if it cannot be built."""
+    d = fresh('strlit')
+    write(os.path.join(d, 'StrLit.lean'),
+          'def greeting : String := "abc"\ntheorem t : greeting ++ "def" = "abcdef" := by decide\n')
+    out = os.path.join(d, 'strlit.ndjson')
+    for argv, stdout in (([os.path.join(LEAN_TOOLCHAIN, 'bin', 'lean'), '-o', 'StrLit.olean', 'StrLit.lean'], None),
+                         ([os.path.join(LEAN_TOOLCHAIN, 'bin', 'leanexport'), 'StrLit', '--', 't'], out)):
+        with open(stdout or os.devnull, 'wb') as f:
+            p = attempt(lambda: subprocess.run(argv, cwd=d, stdout=f, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                               env=dict(os.environ, LEAN_PATH=d, LEAN_ABORT_ON_PANIC='1')))
+        if p is None or p.returncode != 0:
+            return None
+    return out
+
+
+strlit = string_literal_export()
+h = strlit and helper(write(fresh('strlit-targets.jsonl'), '[0,0,["t"],["greeting"]]\n'), strlit)
+check('sanity helper: a proof that reduces a string literal replays, String.ofList and Char.ofNat first',
+      h is not None and h.code == 0 and h.out == '0 0 needed\n')
+h = helper(TARGET_FILES['good'], export_without('good', lambda n: n == 'Good.f', 'good-without-f.ndjson'))
+check('sanity helper: an export that does not replay gives skipped, exit 0',
+      h is not None and h.code == 0 and h.err == ''
+      and h.out == '0 0 skipped\n1 0 skipped\n2 0 skipped\n3 0 skipped\n3 1 skipped\n')
+for bad in ('[0,0,["Good","t1"]]\n', '[0,"0",["Good","t1"],["Good","f"]]\n', '[0,-1,["Good","t1"],["Good","f"]]\n',
+            '[0,0.5,["Good","t1"],["Good","f"]]\n', '[0,0,[],["Good","f"]]\n', '[0,0,["Good",true],["Good","f"]]\n',
+            '[0,0,["Good","t1"],["Good","f"]]\n::error::x\n'):
+    h = helper(write(fresh('bad-targets.jsonl'), bad), os.path.join(FIXTURES, 'good.ndjson'))
+    check('sanity helper: a target line %r exits 1, one line on stderr' % bad, h is not None and h.rejected('targets'))
+h = helper(os.path.join(TMP, 'no-such-targets.jsonl'), os.path.join(FIXTURES, 'good.ndjson'))
+check('sanity helper: a file it cannot read exits 1, one line on stderr', h is not None and h.rejected())
+
 
 # The printer: nanoda reads names by splitting them at dots, so a name it would read as another one
 # is refused, and its output must name what was asked for, in order.
@@ -412,7 +518,7 @@ def invisible(path):
                 if any(unicodedata.category(c) in ('Cc', 'Cf', 'Zl', 'Zp') for c in line.rstrip('\n'))]
 
 
-sources = sorted(glob.glob(os.path.join(ROOT, 'vacheck', '*.py'))) + [
+sources = sorted(glob.glob(os.path.join(ROOT, 'vacheck', '*.py')) + glob.glob(os.path.join(ROOT, 'vacheck', '*.lean'))) + [
     os.path.abspath(__file__), os.path.join(ROOT, 'scripts', 'build.sh'),
     os.path.join(ROOT, 'scripts', 'release.sh')]
 found = {os.path.relpath(p, ROOT): invisible(p) for p in sources}

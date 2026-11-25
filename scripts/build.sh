@@ -13,7 +13,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
 mkdir -p "$stage/app/vacheck" "$out"
-cp "$root"/vacheck/*.py "$root"/vacheck/*.json "$stage/app/vacheck/"
+cp "$root"/vacheck/*.py "$root"/vacheck/*.json "$root"/vacheck/*.lean "$stage/app/vacheck/"
 # What `python3 -m zipapp ... -m vacheck.__main__:main` writes.
 printf '# -*- coding: utf-8 -*-\nimport vacheck.__main__\nvacheck.__main__.main()\n' > "$stage/app/__main__.py"
 find "$stage/app" -type d -exec chmod 755 {} +

@@ -7,6 +7,13 @@
                                      of its components: a string for Name.str, a number for Name.num
     imports --manifest F --source D  prints the first component of every module the project's .lean
                                      files import, one per line, sorted
+    sanity-source                    prints vacheck/sanity.lean, the sanity helper's Lean source
+    sanity-targets --export F --reference F [--reference F ...] --manifest F
+                                     prints the pairs the sanity helper re-checks, one per line, as
+                                     the JSON array [i, j, theorem, definition]: i indexes the
+                                     claims, j the definitions of the claim's statement it re-checks,
+                                     and each name is the JSON array of its components, as names
+                                     writes it
     analyze --export F --reference F [--reference F ...] --manifest F --source D --repo R --commit C
             --toolchain V --kernels K,K --nanoda PATH
                                      prints result.json
@@ -27,9 +34,10 @@ import subprocess
 import sys
 import tempfile
 
+from . import sanity
 from . import toolchain as _toolchain
-from .analyze import AnalysisError, analyze, import_roots
-from .export import ExportError, load_export
+from .analyze import AnalysisError, analyze, check_theorems, import_roots, project_constants
+from .export import ExportError, load_export, name_components
 from .manifest import MAX_BYTES as MANIFEST_BYTES, ManifestError, parse_manifest
 from .result import ALLOWED_AXIOMS, ResultError, validate_result
 from .text import log_line
@@ -124,9 +132,33 @@ def modules(args):
     _out(''.join(line + '\n' for line in (m.project,) + m.modules))
 
 
+def _json_line(obj):
+    return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
 def names(args):
     env = _export(args.file, 'the export')
-    lines = sorted(json.dumps(list(c), ensure_ascii=False, separators=(',', ':')) for c in env.components())
+    lines = sorted(_json_line(list(c)) for c in env.components())
+    _out(''.join(line + '\n' for line in lines))
+
+
+def sanity_source(args):
+    sys.stdout.buffer.write(sanity.source())
+    sys.stdout.buffer.flush()
+
+
+def sanity_targets(args):
+    manifest = _manifest(args.manifest)
+    export = _export(args.export, 'the export')
+    references = [_export(r, "the toolchain's reference export") for r in args.reference]
+    theorems = [c.theorem for c in manifest.claims]
+    check_theorems(export, theorems)
+    try:
+        pairs = sanity.targets(export, theorems, project_constants(export, references, theorems))
+        lines = [_json_line([i, j, list(name_components(export, t)), list(name_components(export, d))])
+                 for i, (t, ds) in enumerate(pairs) for j, d in enumerate(ds)]
+    except ExportError as e:
+        raise Rejected('the export cannot be read: %s' % e) from None
     _out(''.join(line + '\n' for line in lines))
 
 
@@ -308,6 +340,12 @@ def _parser():
         p.add_argument('--' + flag, required=True)
     p.add_argument('--reference', required=True, action='append')
     p.set_defaults(run=analyze_command)
+    commands.add_parser('sanity-source').set_defaults(run=sanity_source)
+    p = commands.add_parser('sanity-targets')
+    for flag in ('export', 'manifest'):
+        p.add_argument('--' + flag, required=True)
+    p.add_argument('--reference', required=True, action='append')
+    p.set_defaults(run=sanity_targets)
     p = commands.add_parser('imports')
     p.add_argument('--manifest', required=True)
     p.add_argument('--source', required=True)
