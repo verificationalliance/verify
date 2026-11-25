@@ -99,9 +99,10 @@ def warnings(export, theorem, defs, any_defs, shown=None):
     defs or of the statement's binders, and at most MAX_WARNINGS.
 
     defs are the project's definitions in the statement, as analyze lists them; any_defs, those of
-    them the helper found the proof holds for any value of. shown, when given, takes the theorem and
-    the name of one of its statement's binders, and says whether the page shows that name; it is asked
-    only about the assumptions the warnings would name.
+    them the helper found the proof holds for any value of. shown, when given, takes the theorem, the
+    position of one of its statement's binders (0 for the first) and that binder's name, and says
+    whether the page shows that name for that binder; it is asked only about the assumptions the
+    warnings would name.
     """
     if not set(any_defs) <= set(defs):
         raise SanityError('a verdict names a definition the statement does not mention')
@@ -113,12 +114,12 @@ def warnings(export, theorem, defs, any_defs, shown=None):
     try:
         budget = Budget()
         found['ignores-argument'] = [(d, arg) for d in props if d not in always for arg in _ignored(export, d, budget)]
-        found['unused-assumption'] = [(h, None) for h in _unused(export, theorem, budget)]
+        found['unused-assumption'] = [(h, None) for h in _unused(export, theorem, budget)]  # h: (position, binder)
     except OutOfSteps:
         found['ignores-argument'] = found['unused-assumption'] = []
     kept = [(check, name, arg) for check in CHECKS for name, arg in found[check]][:MAX_WARNINGS]
     return [{'check': check,
-             'name': _named(export, name, shown, theorem) if check == 'unused-assumption' else name,
+             'name': _named(export, name[1], shown, theorem, name[0]) if check == 'unused-assumption' else name,
              'arg': _named(export, arg) if check == 'ignores-argument' else arg}
             for check, name, arg in kept]
 
@@ -134,9 +135,10 @@ def _ignored(export, d, budget):
 
 def _unused(export, theorem, budget):
     """The explicit binders of the statement that neither the rest of the statement nor the proof's
-    matching lambda mentions, as binder handles. A binder the statement mentions is what the claim is
-    about, not an assumption: by proof irrelevance, the proof of `(h1 h2 : 1 = 1) : f h1 = f h2` may
-    well mention only h1. The statement is walked only when the proof leaves a binder unused."""
+    matching lambda mentions, as (position, binder handle). A binder the statement mentions is what
+    the claim is about, not an assumption: by proof irrelevance, the proof of `(h1 h2 : 1 = 1) :
+    f h1 = f h2` may well mention only h1. The statement is walked only when the proof leaves a binder
+    unused."""
     statement = binder_chain(export, theorem, 'type')
     proof = binder_uses(export, theorem, 'value', budget)
     unused = [k for k, ((_, info), used_by_proof) in enumerate(zip(statement, proof))
@@ -144,15 +146,15 @@ def _unused(export, theorem, budget):
     if not unused:
         return []
     stated = binder_uses(export, theorem, 'type', budget)
-    return [statement[k][0] for k in unused if not stated[k]]
+    return [(k, statement[k][0]) for k in unused if not stated[k]]
 
 
-def _named(export, binder, shown=None, declaration=None):
+def _named(export, binder, shown=None, declaration=None, position=None):
     """A binder's name for a warning, or None when there is none, it has no plain name, is longer
-    than MAX_NAME, holds a character a report cannot show, or shown(declaration, name) is false."""
+    than MAX_NAME, holds a character a report cannot show, or shown(declaration, position, name) is false."""
     # Imported here, not above: the result contract reads CHECKS from this module.
     from .result import hidden_character
     name = None if binder is None else binder_name(export, binder)
     if name is None or len(name) > MAX_NAME or hidden_character(name) is not None:
         return None
-    return name if shown is None or shown(declaration, name) else None
+    return name if shown is None or shown(declaration, position, name) else None

@@ -7,6 +7,7 @@
     {"says": "Pos holds of 1 and 0.", "theorem": "Printed.pos", "about": "model"},
     {"says": "P2 holds of 0 and 1.", "theorem": "Printed.u2", "about": "model"},
     {"says": "P4 holds of 0 and 1.", "theorem": "Printed.u4", "about": "model"},
-    {"says": "A non-empty list has its own length.", "theorem": "Printed.t5", "about": "model"}
+    {"says": "A non-empty list has its own length.", "theorem": "Printed.t5", "about": "model"},
+    {"says": "V 1 holds, and y is y.", "theorem": "Printed.B", "about": "model"}
   ]
 }

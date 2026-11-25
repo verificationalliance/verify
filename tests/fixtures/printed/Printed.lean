@@ -18,4 +18,12 @@ theorem u4 : P4 0 1 := Nat.one_pos
 
 theorem t5 {α : Type} (xs : List α) (h : xs ≠ []) : xs.length = xs.length := rfl
 
+def V (n : Nat) : Prop := n > 0
+
+theorem A {y : Nat} (h : V 2) : V 1 ∧ y = y := ⟨Nat.one_pos, rfl⟩
+
+/-- Exported after A, B's type shares A's tail, binder names and all: its third binder, hv, is named h
+in the export, and nanoda_bin prints it after the colon as `V 2 →`. -/
+theorem B (h : V 1) {y : Nat} (hv : V 2) : V 1 ∧ y = y := ⟨h, rfl⟩
+
 end Printed

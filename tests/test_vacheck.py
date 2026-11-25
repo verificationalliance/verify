@@ -851,11 +851,12 @@ check("sanity: a let's body is under one more binder",
           [('no-project-definition', None, None), ('unused-assumption', 'x', None)]))
 asked = []
 check("sanity: an assumption's name the page does not show is None, and only those warned of are asked about",
-      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'], shown=lambda d, n: asked.append((d, n)) or n != 'c'))
-      == T_WANT[:3] + [('unused-assumption', None, None)] and asked == [('t', 'c')])
+      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'],
+                          shown=lambda d, k, n: asked.append((d, k, n)) or n != 'c'))
+      == T_WANT[:3] + [('unused-assumption', None, None)] and asked == [('t', 2, 'c')])
 asked_names = []
 check('sanity: a name over 200 characters, or with a character a report cannot show, is None',
-      attempt(lambda: got('names', set(), shapes, [], shown=lambda d, n: asked_names.append(n) or True))
+      attempt(lambda: got('names', set(), shapes, [], shown=lambda d, k, n: asked_names.append(n) or True))
       == [('no-project-definition', None, None), ('unused-assumption', 'a' * 200, None),
           ('unused-assumption', None, None), ('unused-assumption', None, None), ('unused-assumption', 'ok', None)]
       and asked_names == ['a' * 200, 'ok'])
@@ -951,7 +952,7 @@ def every_list_accepted():
     """validate_result on each list of warnings that the cases above give: warnings never fail a check."""
     lists = [given(W, t, DEFS[t], ANY.get(t, set())) for t in WANT]
     lists += [given(shapes, 't', ['Q', 'U', 'P'], {'P'}),
-              given(shapes, 't', ['Q', 'U', 'P'], {'P'}, lambda d, n: False),
+              given(shapes, 't', ['Q', 'U', 'P'], {'P'}, lambda d, k, n: False),
               given(shapes, 'names', []), given(shapes, 'let_y', []), given(shapes, 'big', ['Q'], {'Q'})]
     lists += [given(PR, t, ds) for t, ds in (('Printed.u2', ['Printed.P2']), ('Printed.u4', ['Printed.P4']),
                                              ('Printed.pos', ['Printed.Pos']), ('Printed.t5', []))]
@@ -1513,19 +1514,20 @@ check("analyze: each claim has its warnings, from the helper's verdicts, and a n
 check("analyze: verdicts that cannot be read are rejected, naming them",
       "the sanity helper's verdicts cannot be read" in (
           analysis_error(lambda: run('good', ['Good.t1'], verdicts='0 0 any\n0 1 any\n')) or ''))
-check('statement binders: the names nanoda_bin prints before the statement\'s colon',
+check('statement binders: the names nanoda_bin prints before the statement\'s colon, in order, None for none',
       [attempt(lambda t=t: va._statement_binders(t)) for t in (
           'theorem Weak.add_zero_of_valid (n : Nat) (h : Weak.Valid n) : Eq (HAdd.hAdd n (OfNat.ofNat 0)) n',
           'theorem Printed.t5 : forall {α : Type 0} (xs : List α), Ne xs List.nil → Eq (List.length xs) (List.length xs)',
           'theorem «Good.key never leaves» (n : Nat) : LT.lt n (Good.f n)',
           'theorem Weak.vacuous (n : Nat) (h₁ : LT.lt n (OfNat.ofNat 2)) (h₂ : GT.gt n (OfNat.ofNat 5)) :\n  Eq n n',
-          'theorem T.x {α : Type 0} [inst : Inhabited α] [Inhabited Nat] (a b : α) ⦃«my c» : α⦄ :\n  P a')]
-      == [{'n', 'h'}, set(), {'n'}, {'n', 'h₁', 'h₂'}, {'α', 'inst', 'a', 'b', '«my c»'}])
+          'theorem T.x {α : Type 0} [inst : Inhabited α] [Inhabited Nat] (a b : α) ⦃«my c» : α⦄ :\n  P a',
+          'theorem Printed.B (h : Printed.V (OfNat.ofNat 1)) :\n  forall {y : Nat}, Printed.V (OfNat.ofNat 2) → P')]
+      == [('n', 'h'), (), ('n',), ('n', 'h₁', 'h₂'), ('α', 'inst', None, 'a', 'b', '«my c»'), ('h',)])
 check('statement binders: none when where they end is not certain',
       [attempt(lambda t=t: va._statement_binders(t)) for t in (
           'theorem T.s (h : Eq "a : b" "a") : True', 'theorem T.u (h : P :\n  Q', 'theorem T.v (h : P)) : Q',
           'theorem T.w h : P', 'def T.d (h : P) : Prop', 'theorem T.e (h : P)', 'theorem T.m (h : P] : Q')]
-      == [set()] * 7)
+      == [()] * 7)
 
 
 def weak_pp(statement):
@@ -1533,12 +1535,14 @@ def weak_pp(statement):
     return lambda names: {n: statement if n == 'Weak.add_zero_of_valid' else '<pp %s>' % n for n in names}
 
 
-check('analyze: an unused assumption is named only when the statement prints it before its colon',
+check('analyze: an unused assumption is named only when the statement prints its name before its colon, '
+      'in its place',
       [attempt(lambda t=t: run('weak', ['Weak.add_zero_of_valid'], export=W, pp=weak_pp(t))['claims'][0]['warnings'])
        for t in ('theorem Weak.add_zero_of_valid (n : Nat) (h : Weak.Valid n) : Eq (HAdd.hAdd n (OfNat.ofNat 0)) n',
-                 'theorem Weak.add_zero_of_valid : forall (n : Nat), Weak.Valid n → Eq (HAdd.hAdd n (OfNat.ofNat 0)) n')]
-      == [[{'check': 'unused-assumption', 'name': 'h', 'arg': None}],
-          [{'check': 'unused-assumption', 'name': None, 'arg': None}]])
+                 'theorem Weak.add_zero_of_valid : forall (n : Nat), Weak.Valid n → Eq (HAdd.hAdd n (OfNat.ofNat 0)) n',
+                 'theorem Weak.add_zero_of_valid (h : Nat) : forall (n : Weak.Valid h), Eq h h')]
+      == [[{'check': 'unused-assumption', 'name': 'h', 'arg': None}]]
+      + [[{'check': 'unused-assumption', 'name': None, 'arg': None}]] * 2)
 
 
 def manifest_elsewhere():

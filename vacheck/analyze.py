@@ -127,11 +127,13 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
 
-    # The sanity checks' warnings. An unused assumption is named only when nanoda_bin prints it among
-    # the binders before the statement's colon, where the report shows it.
+    # The sanity checks' warnings. An unused assumption is named only when nanoda_bin prints its name in
+    # its place among the binders before the statement's colon, where the report shows it: the export's
+    # name may be another declaration's (leanexport shares a type's tail, names and all).
     before_colon = {t: _statement_binders(printed[t]) for t in theorems}
     try:
-        warnings = {t: sanity.warnings(export, t, defs[t], holds_for_any[t], lambda d, n: n in before_colon[d])
+        warnings = {t: sanity.warnings(export, t, defs[t], holds_for_any[t],
+                                       lambda d, k, n: before_colon[d][k:k + 1] == (n,))
                     for t in theorems}
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
@@ -529,31 +531,33 @@ _BRACKETS = dict(zip(_OPENING, _CLOSING))
 
 
 def _statement_binders(text):
-    """The names among the binders that nanoda_bin prints before a statement's colon, `theorem <name>
-    (a b : A) {c : C} [i : I] ⦃d : D⦄ : <type>`, where the report shows them. Empty when where the
-    binders end is not certain: a string in the text, brackets that do not balance, or anything else
-    before the colon."""
+    """The names of the binders that nanoda_bin prints before a statement's colon, `theorem <name>
+    (a b : A) {c : C} [i : I] [J] ⦃d : D⦄ : <type>`, where the report shows them: one per binder, in
+    order, None for one without a name ([J]). Empty when where the binders end is not certain: a
+    string in the text, brackets that do not balance, or anything else before the colon."""
     flat = _flat(text)
     m = _THEOREM.match(flat)
     rest = flat[m.end():] if m else ''
     colons = _depth_zero(rest, ' : ')
     if not colons:
-        return frozenset()
+        return ()
     head = rest[:colons[0]]
     spaces = _depth_zero(head, ' ')
     if spaces is None:
-        return frozenset()
+        return ()
     cuts = [-1] + spaces + [len(head)]
-    names = set()
+    names = []
     for group in (head[a + 1:b] for a, b in zip(cuts, cuts[1:])):
         if not group:
             continue
         colon = _depth_zero(group[1:-1], ' : ') if group[0] in _BRACKETS else None
         if colon is None or group[-1] != _BRACKETS[group[0]]:
-            return frozenset()
-        if colon:  # `[Inhabited Nat]` names nothing
-            names.update(re.findall(r'(?:«[^»]*»|[^\s«])+', group[1:colon[0] + 1]))
-    return frozenset(names)
+            return ()
+        if colon:  # (a b : A) binds a, then b
+            names.extend(re.findall(r'(?:«[^»]*»|[^\s«])+', group[1:colon[0] + 1]))
+        else:  # [Inhabited Nat] binds one, without a name
+            names.append(None)
+    return tuple(names)
 
 
 def _unwrap(part):

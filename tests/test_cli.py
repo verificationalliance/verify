@@ -431,14 +431,17 @@ check('analyze good: Good.t1 and Good.pick_lowest',
       warnings_of(good_warned) == {'Good.t1': [('holds-for-any', 'Good.f', None)], 'Good.«key never leaves»': [],
                                    'Good.anyIn_nil': [], 'Good.pick_lowest': [('holds-for-any', 'Good.lowest', None)]})
 # What the page prints: nanoda_bin prints t5 as `theorem Printed.t5 : forall {α : Type 0} (xs : List α), Ne xs
-# List.nil → ...`, so its unused h is not named; and P2 as `fun {α : Type 0} (m n : Nat) =>`, whose type
-# calls m n.
+# List.nil → ...`, so its unused h is not named; P2 as `fun {α : Type 0} (m n : Nat) =>`, whose type calls
+# m n; and B as `theorem Printed.B (h : Printed.V 1) : forall {y : Nat}, Printed.V 2 → ...`, whose third
+# binder, unused, the export names h after A's.
 printed_run = analyze('printed', fixture_claims('printed'))
 check('analyze printed: an assumption printed after the colon, and an argument named two ways, are not named',
-      {t: w for t, w in warnings_of(printed_run).items() if t in ('Printed.t5', 'Printed.u2', 'Printed.u4')}
+      {t: w for t, w in warnings_of(printed_run).items()
+       if t in ('Printed.t5', 'Printed.u2', 'Printed.u4', 'Printed.B')}
       == {'Printed.t5': [('no-project-definition', None, None), ('unused-assumption', None, None)],
           'Printed.u2': [('ignores-argument', 'Printed.P2', None)],
-          'Printed.u4': [('ignores-argument', 'Printed.P4', None)]})
+          'Printed.u4': [('ignores-argument', 'Printed.P4', None)],
+          'Printed.B': [('unused-assumption', None, None)]})
 short = write(fresh('verdicts'), open(VERDICTS['good'], 'rb').read().split(b'\n', 1)[1])
 check('analyze rejects a verdict file missing a line',
       analyze('good', fixture_claims('good'), verdicts=short).rejected("the sanity helper's verdicts cannot be read"))
