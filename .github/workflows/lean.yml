@@ -357,7 +357,7 @@ jobs:
     steps:
       - name: Check the export
         id: result
-        uses: verificationalliance/verify/.github/actions/check@809546da962926046260ce22ed3ba1607f926d68 # workflow-8-action
+        uses: verificationalliance/verify/.github/actions/check@fb43b21159680994afaa3a3bebe8970923f07a5b # workflow-8-action
         with:
           manifest: ${{ inputs.manifest }}
 
