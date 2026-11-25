@@ -451,8 +451,11 @@ check('analyze needs --abstracted', r.code == 2 and r.out == '' and r.one_line()
 # the check stands on the rest.
 r = analyze('good', fixture_claims('good'), abstracted=False, stopped=True)
 all_skipped = analyze('good', fixture_claims('good'))
-check('analyze --sanity-stopped reads a stopped helper as every pair skipped',
-      r.code == 0 and r.err == '' and r.out == all_skipped.out and all_skipped.code == 0
+stopped_res, skipped_res = result_of(r), result_of(all_skipped)
+check('analyze --sanity-stopped reads a stopped helper as every pair skipped, and says so in the result',
+      r.code == 0 and r.err == '' and all_skipped.code == 0
+      and stopped_res.get('sanity') == 'stopped' and skipped_res.get('sanity') == 'complete'
+      and dict(stopped_res, sanity=None) == dict(skipped_res, sanity=None)
       and warnings_of(r) == {t: [] for _, t, _ in fixture_claims('good')})
 r = analyze('good', fixture_claims('good'), stopped=True)
 check('analyze takes --abstracted or --sanity-stopped, not both', r.code == 2 and r.out == '' and r.one_line())
@@ -490,6 +493,13 @@ strlit = string_literal_export()
 h = strlit and helper(write(fresh('strlit-targets.jsonl'), '[0,0,["t"],["greeting"]]\n'), strlit)
 check('sanity helper: a proof that reduces a string literal replays, String.ofList and Char.ofNat first',
       h is not None and h.code == 0 and h.out == '0 0 needed\n')
+# It replays only what its pairs need, the closure of their theorems and definitions: without Good.f,
+# the pairs of Good.anyIn_nil and Good.pick_lowest, which do not need it, are still judged.
+h = helper(write(fresh('good-not-f.jsonl'), '[2,0,["Good","anyIn_nil"],["Good","anyIn"]]\n'
+                 '[3,0,["Good","pick_lowest"],["Good","lowest"]]\n[3,1,["Good","pick_lowest"],["Good","pick"]]\n'),
+           export_without('good', lambda n: n == 'Good.f', 'good-without-f.ndjson'))
+check('sanity helper: it replays only what its pairs need',
+      h is not None and h.code == 0 and h.err == '' and h.out == '2 0 needed\n3 0 any\n3 1 needed\n')
 h = helper(TARGET_FILES['good'], export_without('good', lambda n: n == 'Good.f', 'good-without-f.ndjson'))
 check('sanity helper: an export that does not replay gives skipped, exit 0',
       h is not None and h.code == 0 and h.err == ''
@@ -548,6 +558,16 @@ spent = helper_with(PER_CHECK, ('def totalHeartbeats : Nat := 1000000', 'def tot
 h = spent and helper(write(fresh('light3.jsonl'), LIGHT * 3), BUDGET, spent)
 check('sanity helper with a total of 1k heartbeats: the first re-check spends it, the rest are skipped',
       h is not None and h.code == 0 and h.err == '' and h.out == '0 0 any\n0 0 skipped\n0 0 skipped\n')
+# The replay has a budget too, for all of it: in v4.35.0 and v4.36.0, the closure of light costs 300k
+# to 400k heartbeats to replay, and with heavy, 1,000k to 1,100k. With 700k, light alone is judged, and
+# with heavy, the replay stops at the same declaration on every run: every pair skipped, exit 0.
+replay_700 = helper_with(('def replayHeartbeats : Nat := 500000', 'def replayHeartbeats : Nat := 700'))
+h = replay_700 and helper(write(fresh('light.jsonl'), LIGHT), BUDGET, replay_700)
+check('sanity helper with 700k heartbeats for its replay: light alone fits',
+      h is not None and h.code == 0 and h.err == '' and h.out == '0 0 any\n')
+h = replay_700 and helper(write(fresh('light-heavy.jsonl'), LIGHT + HEAVY), BUDGET, replay_700)
+check('sanity helper with 700k heartbeats for its replay: with heavy, every pair is skipped, exit 0',
+      h is not None and h.code == 0 and h.err == '' and h.out == '0 0 skipped\n1 0 skipped\n')
 
 
 # The printer: nanoda reads names by splitting them at dots, so a name it would read as another one

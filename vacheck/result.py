@@ -6,6 +6,10 @@ import unicodedata
 from .sanity import CHECKS, MAX_NAME, MAX_WARNINGS
 
 SCHEMA = 'https://verificationalliance.org/attestations/proof-check/v2'
+# Whether the sanity helper ran to the end ('complete': its verdicts are in the warnings) or the check
+# job stopped it, or it crashed ('stopped': every pair was skipped). Two honest checks of one export
+# give the same value but for a stop, which this records rather than hides.
+SANITY = ('complete', 'stopped')
 ALLOWED_AXIOMS = frozenset({'propext', 'Quot.sound', 'Classical.choice'})
 # The most the workflow can carry from job check to job sign, as canonical JSON (sorted keys, no
 # spaces, UTF-8): job sign reads it from an environment variable, which Linux caps at 128 KiB, in
@@ -145,9 +149,11 @@ def _source(src, what):
 
 def validate_result(obj):
     _keys(obj, ('schema', 'repo', 'commit', 'toolchain', 'checker', 'project', 'build_digest',
-                'claims', 'evidence', 'kernels'), 'result')
+                'claims', 'evidence', 'kernels', 'sanity'), 'result')
     if obj['schema'] != SCHEMA:
         _fail('wrong schema')
+    if not isinstance(obj['sanity'], str) or obj['sanity'] not in SANITY:
+        _fail('sanity must be complete or stopped')
     if not isinstance(obj['repo'], str) or not _REPO.fullmatch(obj['repo']):
         _fail('bad repo')
     if not isinstance(obj['commit'], str) or not _SHA1.fullmatch(obj['commit']):

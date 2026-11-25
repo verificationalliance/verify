@@ -92,7 +92,7 @@ res = {
                 'axioms': ['propext'],
                 'source': {'path': 'core/OSVACore/Ranges.lean', 'line': 56}, 'warnings': [], 'template': None}],
     'evidence': {'ships': ['OSVACore'], 'replaced': [{'path': 'p', 'line': 3, 'text': '@[extern "x"]'}]},
-    'kernels': ['lean', 'nanoda', 'lean4lean'],
+    'kernels': ['lean', 'nanoda', 'lean4lean'], 'sanity': 'complete',
 }
 
 
@@ -215,6 +215,10 @@ check('result v2: a binder name over 200 characters rejected; a definition name 
       result_rejected(warned(dict(H_W, name='a' * 201))) and result_rejected(warned(dict(EVERY[2], arg='a' * 201)))
       and not result_rejected(warned(dict(H_W, name='a' * 200), dict(H_W, name=None)))
       and not result_rejected(warned(dict(EVERY[0], name='D.' + 'a' * 300))))
+check('result v2: a result without sanity rejected', result_rejected(lambda r: r.pop('sanity')))
+check('result v2: sanity is complete or stopped, nothing else',
+      not result_rejected(lambda r: r.update(sanity='stopped'))
+      and all(result_rejected(lambda r, v=v: r.update(sanity=v)) for v in ('done', '', None, True, ['complete'])))
 check('result v2: a name that is not a string rejected',
       result_rejected(warned(dict(H_W, name=7))) and result_rejected(warned(dict(EVERY[0], name=['D']))))
 
@@ -1205,9 +1209,9 @@ check('good says plain and about as declared',
       [(c.get('says'), c.get('about')) for c in gc] == [('Never leaks.', 'code'), ('f is n + 1, or not.', 'model')])
 check('good carries the run and the evidence',
       {k: good_res.get(k)
-       for k in ('schema', 'repo', 'commit', 'toolchain', 'checker', 'project', 'kernels', 'evidence')}
+       for k in ('schema', 'repo', 'commit', 'toolchain', 'checker', 'project', 'kernels', 'evidence', 'sanity')}
       == {'schema': SCHEMA, 'repo': REPO, 'commit': COMMIT, 'toolchain': 'v4.36.0', 'checker': VERSION,
-          'project': 'core', 'kernels': KERNELS, 'evidence': {'ships': ['Good'], 'replaced': []}}
+          'project': 'core', 'kernels': KERNELS, 'evidence': {'ships': ['Good'], 'replaced': []}, 'sanity': 'complete'}
       and is_sha256(good_res.get('build_digest')))
 
 check('sorry rejected', rejected_with('sorry', ['Sorry.t'], 'Sorry.t', 'sorryAx'))
@@ -1540,6 +1544,18 @@ check("analyze: each claim has its warnings, from the helper's verdicts, and a n
           'good', ['Good.t1', 'Good.pick_lowest'], verdicts='0 0 any\n1 0 any\n1 1 needed\n')['claims']])
       == [([{'check': 'holds-for-any', 'name': 'Good.f', 'arg': None}], None),
           ([{'check': 'holds-for-any', 'name': 'Good.lowest', 'arg': None}], None)])
+
+
+def stopped_run():
+    """analyze of Good.t1 with no verdicts: the helper was stopped, or crashed."""
+    root, manifest = source_tree('good', [('x', 'Good.t1', 'model')])
+    return va.analyze(envs['good'], refs['good'], manifest, root, REPO, COMMIT, 'v4.36.0', KERNELS, printer,
+                      '.verificationalliance.json', None)
+
+
+check("analyze: the result says the helper ran to the end, or was stopped, when it gave no verdicts",
+      attempt(lambda: run('good', ['Good.t1'], verdicts='0 0 any\n')['sanity']) == 'complete'
+      and attempt(lambda: [(r['sanity'], r['claims'][0]['warnings']) for r in [stopped_run()]][0]) == ('stopped', []))
 check("analyze: verdicts that cannot be read are rejected, naming them",
       "the sanity helper's verdicts cannot be read" in (
           analysis_error(lambda: run('good', ['Good.t1'], verdicts='0 0 any\n0 1 any\n')) or ''))

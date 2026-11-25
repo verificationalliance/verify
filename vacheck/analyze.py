@@ -214,6 +214,7 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         'claims': claims,
         'evidence': {'ships': list(manifest.ships), 'replaced': replaced},
         'kernels': list(kernels),
+        'sanity': 'stopped' if verdicts is None else 'complete',
     }
     try:
         validate_result(result)

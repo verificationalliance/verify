@@ -130,9 +130,18 @@ MUTANTS = [
      "        _str(v, what, MAX_NAME)", "        _str(v, what)"),
     (RESULT, "validate_result caps a definition's name at 200 characters",
      "            _str(w['name'], 'warning name')", "            _str(w['name'], 'warning name', MAX_NAME)"),
+    # The result says whether the helper ran to the end.
+    (RESULT, 'validate_result accepts any value of sanity',
+     "if not isinstance(obj['sanity'], str) or obj['sanity'] not in SANITY:", "if False:"),
+    (ANALYZE, 'a stopped helper is recorded as complete',
+     "'sanity': 'stopped' if verdicts is None else 'complete',", "'sanity': 'complete',"),
 ]
 
 CLI_MUTANTS = [
+    ('vacheck/sanity.lean', 'the helper replays the whole export, not what its pairs need',
+     'replay (map.filter fun n _ => needed.contains n)', 'replay map'),
+    ('vacheck/sanity.lean', 'the replay has no budget',
+     'maxHeartbeats.set {} replayHeartbeats', 'maxHeartbeats.set {} 0'),
     ('vacheck/sanity.lean', 'the helper never stops at its total budget',
      'if spent < totalHeartbeats * 1000 then', 'if true then'),
     (ANALYZE, 'a stopped helper is read as a helper that gave no verdict',
