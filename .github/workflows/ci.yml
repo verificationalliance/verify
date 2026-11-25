@@ -47,3 +47,28 @@ jobs:
 
       - name: test_cli, the sanity helper built by v4.35.0
         run: LEAN_TOOLCHAIN="$RUNNER_TEMP/lean-v4.35.0" python3 -I tests/test_cli.py
+
+  # tests/mutants.py breaks vacheck one rule at a time, in a copy of the repository, and requires the
+  # tests to fail. Its last mutants break the sanity helper and the command line, which test_cli
+  # catches, so it needs the v4.36.0 toolchain too. A job of its own: it runs the tests about fifty times.
+  mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Get the v4.36.0 toolchain
+        run: |
+          read -r url sha < <(python3 -I -c 'import json, sys; t = json.load(open(sys.argv[1]))[sys.argv[2]]; print(t["url"], t["sha256"])' vacheck/toolchains.json v4.36.0)
+          curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" "$url"
+          echo "$sha  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/lean-v4.36.0"
+          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP/lean-v4.36.0" --strip-components=1
+          rm "$RUNNER_TEMP/lean.tar.zst"
+          echo "NANODA_BIN=$RUNNER_TEMP/lean-v4.36.0/bin/nanoda_bin" >> "$GITHUB_ENV"
+          echo "LEAN_TOOLCHAIN=$RUNNER_TEMP/lean-v4.36.0" >> "$GITHUB_ENV"
+
+      - name: mutants
+        run: python3 -I tests/mutants.py
