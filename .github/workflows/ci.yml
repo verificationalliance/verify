@@ -48,6 +48,21 @@ jobs:
       - name: test_cli, the sanity helper built by v4.35.0
         run: LEAN_TOOLCHAIN="$RUNNER_TEMP/lean-v4.35.0" python3 -I tests/test_cli.py
 
+  # On main and on every release tag, release.sh's check of lean.yml's pin: the check action it runs
+  # is in the commit's history, and the same as the commit's own. It needs the whole history.
+  pin:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/workflow-'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: release.sh --check-only
+        run: bash scripts/release.sh --check-only
+
   # tests/mutants.py breaks vacheck one rule at a time, in a copy of the repository, and requires the
   # tests to fail. Its last mutants break the sanity helper and the command line, which test_cli
   # catches, so it needs the v4.36.0 toolchain too. A job of its own: it runs the tests about fifty times.

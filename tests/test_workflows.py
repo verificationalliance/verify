@@ -140,8 +140,8 @@ def edit(path, old, new):
         f.write(re.sub(old, new, text, count=1))
 
 
-def release():
-    r = subprocess.run(['bash', os.path.join(REPO, 'scripts', 'release.sh'), os.path.join(TMP, 'dist')],
+def release(*args):
+    r = subprocess.run(['bash', os.path.join(REPO, 'scripts', 'release.sh')] + list(args or [os.path.join(TMP, 'dist')]),
                        env=GIT_ENV, capture_output=True, text=True)
     return r.returncode, r.stdout
 
@@ -163,11 +163,19 @@ try:
     pin('0' * 40)
     first = commit('the action, pinned at no commit')
     check('release.sh refuses a pin that is no commit', release()[0] == 1)
+    check('release.sh --check-only refuses it too', release('--check-only')[0] == 1)
     pin(first)
     second = commit('pinned at the commit before')
+    check('release.sh --check-only accepts the pin, and builds nothing',
+          release('--check-only') == (0, '') and not os.path.exists(os.path.join(TMP, 'dist')))
     code, out = release()
     check('release.sh releases a pin whose action is the release commit\'s, and prints the sha256',
           code == 0 and re.fullmatch(r'[0-9a-f]{64}  \S+vacheck\.pyz\n', out) is not None)
+    # It builds what HEAD holds: a change not committed is not released.
+    with open(os.path.join(REPO, 'vacheck', '__init__.py'), 'a', encoding='utf-8') as f:
+        f.write('# not committed\n')
+    check('release.sh builds HEAD, not a change to vacheck/ that is not committed', release() == (code, out))
+    git('checkout', '--', 'vacheck/__init__.py')
     edit(ACTION_PATH, 'HEAD, TAIL = 100, 300', 'HEAD, TAIL = 100, 301')
     check('release.sh refuses an action changed and not committed', release()[0] == 1)
     commit('the action changed after its pin')

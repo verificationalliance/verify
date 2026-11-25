@@ -2,14 +2,24 @@
 # Builds a release at the commit to release, HEAD: checks the commit, then builds vacheck.pyz with
 # scripts/build.sh, which prints its sha256.
 # Usage: scripts/release.sh [output folder, dist by default]
+#        scripts/release.sh --check-only     checks the commit and builds nothing
 #
 # It refuses a release whose lean.yml runs another check action than the release commit's own.
 # lean.yml names the action in full, pinned by commit, as a called workflow must, and a commit
 # cannot name itself: the pin is an earlier commit. So that commit must be in HEAD's history, and
 # its .github/actions/check the same as HEAD's, file for file. The check needs the whole history,
-# so tests/test_workflows.py tests it in a repository of its own, and test_cli builds with build.sh.
+# so tests/test_workflows.py tests it in a repository of its own, and ci runs it with
+# --check-only on main and on every workflow-* tag.
+#
+# It builds what HEAD holds, from `git archive HEAD`: a change to vacheck/ or scripts/ that is
+# not committed is not in the release.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+check_only=false
+if [[ ${1:-} == --check-only ]]; then
+  check_only=true
+  shift
+fi
 
 refuse() {
   echo "release.sh: $1" >&2
@@ -32,4 +42,11 @@ mine=$(git -C "$root" rev-parse -q --verify "HEAD:.github/actions/check" || true
 [[ -n $mine && $theirs == "$mine" ]] \
   || refuse "lean.yml pins the check action at $pin, whose .github/actions/check is not the release commit's."
 echo "lean.yml runs the check action of $pin, the same as the release commit's." >&2
-exec bash "$root/scripts/build.sh" "$@"
+if $check_only; then
+  exit 0
+fi
+out=$(mkdir -p "${1:-$root/dist}" && cd "${1:-$root/dist}" && pwd)
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+git -C "$root" archive HEAD scripts vacheck | tar -x -C "$stage"
+bash "$stage/scripts/build.sh" "$out"
