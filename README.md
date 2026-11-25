@@ -15,6 +15,13 @@ project's definitions; one whose proof still holds with a definition replaced by
 always true or ignores an argument; an assumption the proof never uses. These are warnings on the report, not
 failures. A warning on a reviewed claim voids the review.
 
+The kernel check behind "holds whatever it is" tries each pair of a claim and a definition its statement
+names, unless another constant of the statement is made of that definition. The result's `sanity` says how
+far it got: `complete`, every pair it tried has a verdict; `partial`, at least one pair was skipped at a
+budget or a limit (its heartbeats, the kernel's recursion depth or memory), so such a warning may be missing;
+`stopped`, the check job stopped it, and no pair has a verdict. The budgets are counted in heartbeats, the
+same on every run.
+
 ## Two levels
 
 - **Design proved.** The theorems are checked. They say something about a model of your system.

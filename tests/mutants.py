@@ -134,7 +134,12 @@ MUTANTS = [
     (RESULT, 'validate_result accepts any value of sanity',
      "if not isinstance(obj['sanity'], str) or obj['sanity'] not in SANITY:", "if False:"),
     (ANALYZE, 'a stopped helper is recorded as complete',
-     "'sanity': 'stopped' if verdicts is None else 'complete',", "'sanity': 'complete',"),
+     "        sanity_reached = 'stopped'\n", "        sanity_reached = 'complete'\n"),
+    (ANALYZE, 'a skipped pair is recorded as complete',
+     "        sanity_reached = 'partial'\n", "        sanity_reached = 'complete'\n"),
+    (ANALYZE, 'a result is partial without a skipped pair',
+     "        sanity_reached = 'complete'\n", "        sanity_reached = 'partial'\n"),
+    (RESULT, 'validate_result refuses partial', "SANITY = ('complete', 'partial', 'stopped')", "SANITY = ('complete', 'stopped')"),
 ]
 
 CLI_MUTANTS = [

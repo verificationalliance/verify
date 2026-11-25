@@ -216,8 +216,8 @@ check('result v2: a binder name over 200 characters rejected; a definition name 
       and not result_rejected(warned(dict(H_W, name='a' * 200), dict(H_W, name=None)))
       and not result_rejected(warned(dict(EVERY[0], name='D.' + 'a' * 300))))
 check('result v2: a result without sanity rejected', result_rejected(lambda r: r.pop('sanity')))
-check('result v2: sanity is complete or stopped, nothing else',
-      not result_rejected(lambda r: r.update(sanity='stopped'))
+check('result v2: sanity is complete, partial or stopped, nothing else',
+      not result_rejected(lambda r: r.update(sanity='partial')) and not result_rejected(lambda r: r.update(sanity='stopped'))
       and all(result_rejected(lambda r, v=v: r.update(sanity=v)) for v in ('done', '', None, True, ['complete'])))
 check('result v2: a name that is not a string rejected',
       result_rejected(warned(dict(H_W, name=7))) and result_rejected(warned(dict(EVERY[0], name=['D']))))
@@ -1207,11 +1207,12 @@ check('good statements, defs and axioms',
           ('<pp Good.t1>', [F_DEF], ['Classical.choice', 'Quot.sound', 'propext'])])
 check('good says plain and about as declared',
       [(c.get('says'), c.get('about')) for c in gc] == [('Never leaks.', 'code'), ('f is n + 1, or not.', 'model')])
+# run's verdicts skip every pair: the result is partial.
 check('good carries the run and the evidence',
       {k: good_res.get(k)
        for k in ('schema', 'repo', 'commit', 'toolchain', 'checker', 'project', 'kernels', 'evidence', 'sanity')}
       == {'schema': SCHEMA, 'repo': REPO, 'commit': COMMIT, 'toolchain': 'v4.36.0', 'checker': VERSION,
-          'project': 'core', 'kernels': KERNELS, 'evidence': {'ships': ['Good'], 'replaced': []}, 'sanity': 'complete'}
+          'project': 'core', 'kernels': KERNELS, 'evidence': {'ships': ['Good'], 'replaced': []}, 'sanity': 'partial'}
       and is_sha256(good_res.get('build_digest')))
 
 check('sorry rejected', rejected_with('sorry', ['Sorry.t'], 'Sorry.t', 'sorryAx'))
@@ -1553,8 +1554,11 @@ def stopped_run():
                       '.verificationalliance.json', None)
 
 
-check("analyze: the result says the helper ran to the end, or was stopped, when it gave no verdicts",
+check("analyze: sanity is complete when every pair has a verdict, partial when one was skipped, stopped with none",
       attempt(lambda: run('good', ['Good.t1'], verdicts='0 0 any\n')['sanity']) == 'complete'
+      and attempt(lambda: run('good', ['Good.t1'], verdicts='0 0 needed\n')['sanity']) == 'complete'
+      and attempt(lambda: run('good', ['Good.t1', 'Good.pick_lowest'], verdicts='0 0 any\n1 0 skipped\n1 1 needed\n')['sanity'])
+      == 'partial'
       and attempt(lambda: [(r['sanity'], r['claims'][0]['warnings']) for r in [stopped_run()]][0]) == ('stopped', []))
 check("analyze: verdicts that cannot be read are rejected, naming them",
       "the sanity helper's verdicts cannot be read" in (

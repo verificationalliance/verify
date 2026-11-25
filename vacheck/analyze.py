@@ -107,6 +107,13 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
                          else sanity.read_verdicts(verdicts, pairs))
     except sanity.SanityError as e:
         raise AnalysisError("the sanity helper's verdicts cannot be read: %s" % e) from None
+    # How far the helper got (result.SANITY): read_verdicts has checked that each line is a verdict.
+    if verdicts is None:
+        sanity_reached = 'stopped'
+    elif any(line.endswith(' skipped') for line in verdicts.split('\n')):
+        sanity_reached = 'partial'
+    else:
+        sanity_reached = 'complete'
 
     # 4 and 5. Statements and definitions as printed from the checked export, and the constructors
     # of an inductive type among the definitions, to show them with it.
@@ -214,7 +221,7 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
         'claims': claims,
         'evidence': {'ships': list(manifest.ships), 'replaced': replaced},
         'kernels': list(kernels),
-        'sanity': 'stopped' if verdicts is None else 'complete',
+        'sanity': sanity_reached,
     }
     try:
         validate_result(result)

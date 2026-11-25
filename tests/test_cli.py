@@ -22,7 +22,8 @@ NANODA = os.environ.get('NANODA_BIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0/bin/nanoda_bin')
 LEAN_TOOLCHAIN = os.environ.get('LEAN_TOOLCHAIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0')
-MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak', 'reach': 'Reach', 'printed': 'Printed'}
+MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak', 'reach': 'Reach', 'printed': 'Printed',
+           'budget': 'Budget'}
 REPO, COMMIT = 'github.com/acme/proj', 'c' * 40
 TMP = tempfile.mkdtemp(prefix='test_cli-')
 
@@ -454,7 +455,7 @@ all_skipped = analyze('good', fixture_claims('good'))
 stopped_res, skipped_res = result_of(r), result_of(all_skipped)
 check('analyze --sanity-stopped reads a stopped helper as every pair skipped, and says so in the result',
       r.code == 0 and r.err == '' and all_skipped.code == 0
-      and stopped_res.get('sanity') == 'stopped' and skipped_res.get('sanity') == 'complete'
+      and stopped_res.get('sanity') == 'stopped' and skipped_res.get('sanity') == 'partial'
       and dict(stopped_res, sanity=None) == dict(skipped_res, sanity=None)
       and warnings_of(r) == {t: [] for _, t, _ in fixture_claims('good')})
 r = analyze('good', fixture_claims('good'), stopped=True)
@@ -558,6 +559,21 @@ spent = helper_with(PER_CHECK, ('def totalHeartbeats : Nat := 1000000', 'def tot
 h = spent and helper(write(fresh('light3.jsonl'), LIGHT * 3), BUDGET, spent)
 check('sanity helper with a total of 1k heartbeats: the first re-check spends it, the rest are skipped',
       h is not None and h.code == 0 and h.err == '' and h.out == '0 0 any\n0 0 skipped\n0 0 skipped\n')
+# The result says whether every pair got a verdict: budget's claims, light and heavy, judged by the helper
+# (complete) and by the copy with 500k heartbeats a re-check, which skips heavy (partial).
+budget_root = tree('budget', (('Light holds.', 'Budget.light', 'model'), ('Heavy holds.', 'Budget.heavy', 'model')))
+r = cli('sanity-targets', '--export', BUDGET, '--reference', REFS['budget'],
+        '--manifest', os.path.join(budget_root, '.verificationalliance.json'))
+check('sanity-targets: budget gives light and heavy, with tag', r.code == 0 and r.out == LIGHT + HEAVY)
+budget_targets = write(fresh('budget-targets.jsonl'), r.raw)
+for exe, verdicts, sanity, light in ((SANITY, '0 0 any\n1 0 any\n', 'complete', [('holds-for-any', 'Budget.tag', None)]),
+                                     (small, '0 0 any\n1 0 skipped\n', 'partial', [('holds-for-any', 'Budget.tag', None)])):
+    h = exe and helper(budget_targets, BUDGET, exe)
+    res = analyze('budget', root=budget_root, verdicts=write(fresh('budget-verdicts'), h.raw)) if h is not None else None
+    check('analyze budget: %s, from the verdicts %r' % (sanity, verdicts),
+          h is not None and h.out == verdicts and res.code == 0
+          and result_of(res).get('sanity') == sanity and warnings_of(res).get('Budget.light') == light
+          and warnings_of(res).get('Budget.heavy') == (light if sanity == 'complete' else []))
 # The replay has a budget too, for all of it: in v4.35.0 and v4.36.0, the closure of light costs 300k
 # to 400k heartbeats to replay, and with heavy, 1,000k to 1,100k. With 700k, light alone is judged, and
 # with heavy, the replay stops at the same declaration on every run: every pair skipped, exit 0.
