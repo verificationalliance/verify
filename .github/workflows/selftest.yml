@@ -1,8 +1,9 @@
-# Runs lean.yml on fixtures, as a developer's repository would call it: `good` and `println` must
-# pass and be signed; `sorry`, `fakeeq`, `native`, `axiom` and `forge` must fail, all in job `check`;
+# Runs lean.yml on fixtures, as a developer's repository would call it: `good`, `weak` and `println`
+# must pass and be signed, `weak` and `good` with the sanity checks' warnings that the tests expect;
+# `sorry`, `fakeeq`, `native`, `axiom` and `forge` must fail, all in job `check`;
 # `dotlake`, a project with its .lake folder committed, must fail in `build`, before building.
-# The run as a whole shows as failed, because they do; the assert jobs are the verdict. Two calls
-# sign here, so the run's osva-proof-result is either one's: both are this repository and commit.
+# The run as a whole shows as failed, because they do; the assert jobs are the verdict. Three calls
+# sign here, so the run's osva-proof-result is any one's: all are this repository and commit.
 # `good`'s export is then checked again as our re-check checks one, by the check action in a job of
 # its own, with the export downloaded from this run by its id: both must give the same result.json.
 name: selftest
@@ -20,6 +21,16 @@ jobs:
     uses: ./.github/workflows/lean.yml
     with:
       manifest: tests/fixtures/good/.verificationalliance.json
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  # Claims that say less than they read: each gets the warnings tests/test_cli.py expects.
+  weak:
+    uses: ./.github/workflows/lean.yml
+    with:
+      manifest: tests/fixtures/weak/.verificationalliance.json
     permissions:
       contents: read
       id-token: write
@@ -143,7 +154,7 @@ jobs:
           echo "Both checks gave result.json with sha256 $(printf '%s' "$FIRST" | base64 -d | sha256sum | cut -d ' ' -f 1)."
 
   assert:
-    needs: [good, println, sorry, fakeeq, native, axiom, forge, dotlake]
+    needs: [good, weak, println, sorry, fakeeq, native, axiom, forge, dotlake]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -154,16 +165,52 @@ jobs:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
     steps:
-      - name: good and println passed, sorry failed
+      - name: good, weak and println passed, sorry failed
         env:
           GOOD: ${{ needs.good.result }}
+          WEAK: ${{ needs.weak.result }}
           PRINTLN: ${{ needs.println.result }}
           SORRY: ${{ needs.sorry.result }}
         run: |
-          echo "good: $GOOD, println: $PRINTLN, sorry: $SORRY"
+          echo "good: $GOOD, weak: $WEAK, println: $PRINTLN, sorry: $SORRY"
           test "$GOOD" = success
+          test "$WEAK" = success
           test "$PRINTLN" = success
           test "$SORRY" = failure
+
+      # The sanity checks: weak's and good's claims, in order, each with the warnings that
+      # tests/test_cli.py expects of the same fixtures.
+      - name: weak and good have the expected warnings
+        env:
+          WEAK: ${{ needs.weak.outputs.result }}
+          GOOD: ${{ needs.good.outputs.result }}
+        run: |
+          python3 -I - <<'EOF'
+          import base64, json, os
+          WANT = {
+              'WEAK': [
+                  ('Weak.prog_safe', [('holds-for-any', 'Weak.prog', None), ('always-true', 'Weak.Safe', None)]),
+                  ('Weak.sort_example', []),
+                  ('Weak.add_zero_of_valid', [('holds-for-any', 'Weak.Valid', None), ('unused-assumption', 'h', None)]),
+                  ('Weak.sort_length_self', [('holds-for-any', 'Weak.sort', None)]),
+                  ('Weak.vacuous', [('holds-for-any', 'Weak.sort', None)]),
+                  ('Weak.no_project', [('no-project-definition', None, None)]),
+                  ('Weak.arrow', [('holds-for-any', 'Weak.Valid', None), ('unused-assumption', None, None)]),
+                  ('Weak.by_lemma', [('no-project-definition', None, None)]),
+              ],
+              'GOOD': [
+                  ('Good.t1', [('holds-for-any', 'Good.f', None)]),
+                  ('Good.\u00abkey never leaves\u00bb', []),
+                  ('Good.anyIn_nil', []),
+                  ('Good.pick_lowest', [('holds-for-any', 'Good.lowest', None)]),
+              ],
+          }
+          for var, want in WANT.items():
+              result = json.loads(base64.b64decode(os.environ[var], validate=True))
+              got = [(c['theorem'], [(w['check'], w['name'], w['arg']) for w in c['warnings']]) for c in result['claims']]
+              print(var.lower(), result['schema'], got == want)
+              assert got == want, got
+          EOF
 
       - name: Download a signed result
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -180,7 +227,7 @@ jobs:
           gh attestation verify result/result.json --bundle result/result.sigstore.json \
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/lean.yml" \
-            --predicate-type https://verificationalliance.org/attestations/proof-check/v1 \
+            --predicate-type https://verificationalliance.org/attestations/proof-check/v2 \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
 
@@ -189,7 +236,7 @@ jobs:
   # Failing in `build` would mean the trust check never ran. Only job names and conclusions are
   # read, never log text.
   assert-check:
-    needs: [good, println, sorry, fakeeq, native, axiom, forge, dotlake]
+    needs: [good, weak, println, sorry, fakeeq, native, axiom, forge, dotlake]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -199,7 +246,7 @@ jobs:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
     steps:
-      - name: The five failed in check, dotlake in build, and good and println were signed
+      - name: The five failed in check, dotlake in build, and good, weak and println were signed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -211,7 +258,7 @@ jobs:
             test "$(awk -F'\t' -v n="$c / build (untrusted)" '$1 == n {print $2}' jobs.tsv)" = success
             test "$(awk -F'\t' -v n="$c / sign" '$1 == n {print $2}' jobs.tsv)" != success
           done
-          for c in good println; do
+          for c in good weak println; do
             test "$(awk -F'\t' -v n="$c / check" '$1 == n {print $2}' jobs.tsv)" = success
             test "$(awk -F'\t' -v n="$c / sign" '$1 == n {print $2}' jobs.tsv)" = success
           done

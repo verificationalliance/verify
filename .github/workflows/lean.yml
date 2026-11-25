@@ -409,7 +409,7 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: result.json
-          predicate-type: https://verificationalliance.org/attestations/proof-check/v1
+          predicate-type: https://verificationalliance.org/attestations/proof-check/v2
           predicate-path: result.json
 
       - name: Keep the bundle

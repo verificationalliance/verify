@@ -19,8 +19,17 @@
 #
 # No text from the repository or the export reaches the log unescaped: the runner reads workflow
 # commands in the log, and this action must not take any from the developer. vacheck's own
-# messages are escaped; every other tool's output goes through say.py or into a file. The inputs
-# reach the steps only through env, as data, and a step checks each before anything is read.
+# messages are escaped; every other tool's output goes through say.py or into a file.
+#
+# How the inputs reach the steps: a run script gets one only through its step's env:, as data, never
+# written into the script; a uses: step gets one only through with:; and the two download steps'
+# if: compare export-run-id with the empty string. Where each is checked, before anything uses it:
+# - repository, commit, export-run-id and export-repository: "Check the inputs", before the checkout
+#   and the download;
+# - manifest: manifest_path.py, in "Read the manifest", in the checkout: a relative path to a file,
+#   without .. and through no symlink;
+# - github-token: not checked. Only download-artifact reads it, through with:, and only for a
+#   re-check, with export-run-id.
 name: Verification Alliance check
 description: Replays a Lean 4 project's export through the toolchain's kernels and writes result.json.
 
@@ -52,7 +61,7 @@ inputs:
 
 outputs:
   result:
-    description: The base64 of result.json, at most 128,000 characters.
+    description: The base64 of result.json (schema https://verificationalliance.org/attestations/proof-check/v2), at most 128,000 characters.
     value: ${{ steps.result.outputs.result }}
 
 runs:
@@ -72,8 +81,9 @@ runs:
         fi
         echo "Runner $RUNNER_NAME, image $ImageOS $ImageVersion, $os."
 
-    # The inputs reach the checkout, vacheck and the download only through env. Each must be what
-    # it names, or the check stops before it reads anything; no value is printed.
+    # repository, commit, export-run-id and export-repository, through env: each must be what it
+    # names, or the check stops before the checkout and the download read them, through with:. No
+    # value is printed. The manifest is checked once the checkout is there, in "Read the manifest".
     - name: Check the inputs
       shell: bash --noprofile --norc -euo pipefail {0}
       env:
@@ -543,6 +553,65 @@ runs:
         echo "Libraries loaded besides @base: ${libraries[*]}; compared, because the project imports them: ${compared[*]:-none}."
         for f in refs/*.ndjson; do echo "Reference $(basename "$f" .ndjson): $(stat -c %s "$f") bytes."; done
 
+    # Which definitions each proof needs. For each claim, and each definition its statement names that
+    # nothing else in the statement is made of, the sanity helper asks the kernel whether the
+    # developer's proof still holds with the definition replaced by any value of its type: if so,
+    # the claim says less than it reads, and its report says so. vacheck chooses the pairs
+    # (sanity-targets) and reads the verdicts back; the helper is vacheck's own Lean program
+    # (sanity-source), built with the toolchain as the reference program is. Both read the export,
+    # so both run in the sandbox, as this user, in a scope of their own with at most 8 GiB of memory
+    # and no swap, and both within 30 minutes. The cap is a cgroup's: under an address-space limit,
+    # the Lean runtime cannot start its threads. Their output goes to files, and their messages
+    # reach the log only through say.py.
+    # The sanity step never fails the check. Stopped by a limit, or failing in any way, it gives no
+    # verdict, and Analyze reads every pair as skipped (--sanity-stopped): the check passes or fails
+    # on the rest. Only a helper that exits 0 hands its verdicts on, and vacheck reads them as
+    # strictly as the export.
+    - name: Test which definitions each proof needs
+      shell: bash --noprofile --norc -euo pipefail {0}
+      env:
+        MANIFEST: ${{ inputs.manifest }}
+      run: |
+        va="$RUNNER_TEMP/va"
+        lean="$RUNNER_TEMP/lean"
+        work=$(cat "$va/work")
+        export_file="$RUNNER_TEMP/export/export.ndjson"
+        manifest="$GITHUB_WORKSPACE/$MANIFEST"
+        rm -f "$va/sanity-done"
+        deadline=$((SECONDS + 1800))
+        # limited COMMAND ARG...: COMMAND as this user, in a scope of its own with at most 8 GiB of
+        # memory and no swap, stopped at the deadline.
+        limited() {
+          local left=$((deadline - SECONDS))
+          (( left > 0 )) || return 124
+          sudo systemd-run --scope --quiet --collect -p MemoryMax=8G -p MemorySwapMax=0 \
+            --uid="$(id -u)" --gid="$(id -g)" -- timeout -k 10 "$left" "$@"
+        }
+        # stopped WHY LOG: the step ends here, without verdicts, saying LOG through say.py.
+        stopped() {
+          python3 -I "$va/say.py" "$va/vacheck.pyz" < "$2" || true
+          echo "::warning::The sanity helper gave no verdicts ($1), so every pair is skipped."
+          exit 0
+        }
+        references=() bound=()
+        while read -r f; do references+=(--reference "$f"); bound+=(--ro "$f"); done < "$va/references"
+        limited "$va/sandbox" --ro "$va/vacheck.pyz" --ro "$export_file" --ro "$manifest" "${bound[@]}" \
+          -- /usr/bin/python3 -I "$va/vacheck.pyz" sanity-targets --export "$export_file" "${references[@]}" \
+          --manifest "$manifest" > "$work/targets.jsonl" 2> "$work/targets.log" \
+          || stopped "sanity-targets exited with $?" "$work/targets.log"
+        python3 -I "$va/vacheck.pyz" sanity-source > "$work/Sanity.lean" 2> "$work/build.log" \
+          || stopped "vacheck did not write the helper's source" "$work/build.log"
+        (cd "$work" && "$lean/bin/lean" -c sanity.c Sanity.lean && "$lean/bin/leanc" -o sanity sanity.c -lLeanExport) \
+          >> "$work/build.log" 2>&1 || stopped "the helper did not build" "$work/build.log"
+        # Exit 124 is the deadline, and 137 the memory cap (or another kill).
+        limited "$va/sandbox" --ro "$lean" --ro "$work/sanity" --ro "$work/targets.jsonl" --ro "$export_file" \
+          --setenv LEAN_SYSROOT "$lean" --setenv LEAN_ABORT_ON_PANIC 1 \
+          -- "$work/sanity" "$work/targets.jsonl" "$export_file" > "$va/verdicts" 2> "$work/sanity.log" \
+          || stopped "the helper exited with $?" "$work/sanity.log"
+        touch "$va/sanity-done"
+        count() { grep -c " $1\$" "$va/verdicts" || true; }
+        echo "The sanity helper judged $(wc -l < "$va/verdicts") pairs in $SECONDS s: $(count any) hold whatever their definition is, $(count needed) need it, $(count skipped) skipped."
+
     - name: Analyze
       shell: bash --noprofile --norc -euo pipefail {0}
       env:
@@ -565,6 +634,11 @@ runs:
         chmod +x "$va/nanoda"
         references=()
         while read -r f; do references+=(--reference "$f"); done < "$va/references"
+        # The helper's verdicts only when it exited 0; else none, and every pair is skipped.
+        sanity=(--sanity-stopped)
+        if [[ -e "$va/sanity-done" ]]; then
+          sanity=(--abstracted "$va/verdicts")
+        fi
         if ! python3 -I "$va/vacheck.pyz" analyze \
           --export "$export_file" \
           "${references[@]}" \
@@ -575,6 +649,7 @@ runs:
           --toolchain "$version" \
           --kernels "$(cat "$va/kernels")" \
           --nanoda "$va/nanoda" \
+          "${sanity[@]}" \
           > "$va/result.json"; then
           echo "::error::The check failed: the line above says why."
           exit 1

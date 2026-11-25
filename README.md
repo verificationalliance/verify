@@ -10,6 +10,11 @@ theorem you claim with independent kernels. Only the axioms `propext`, `Quot.sou
 `Classical.choice` are allowed, so `sorry`, `native_decide` and your own axioms fail. GitHub
 then signs the result for your commit. Nothing from your repository runs on our servers.
 
+Each claim is also checked for signs that it says less than it reads: a statement that names none of the
+project's definitions; one whose proof still holds with a definition replaced by any other; a definition that is
+always true or ignores an argument; an assumption the proof never uses. These are warnings on the report, not
+failures. A warning on a reviewed claim voids the review.
+
 ## Two levels
 
 - **Design proved.** The theorems are checked. They say something about a model of your system.
@@ -45,6 +50,11 @@ jobs:
 Public repositories on github.com only. Lean 4 v4.35.0 or later, with no Lake dependencies, and
 the project's `.lake` folder not committed. The jobs that check and sign stop unless the runner
 says it is a standard GitHub-hosted `ubuntu-24.04` one, which a runner image made to lie could fake.
+
+If your organisation or repository allows only selected actions, allow the check action
+`verificationalliance/verify/.github/actions/check` as well as the workflow: its `check` job runs that
+action. The export is kept 7 days, for our re-check of the signed result; a shorter artifact retention
+set for your repository or organisation cuts that short, and a re-check after it ends cannot run.
 
 ## The build digest
 

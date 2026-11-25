@@ -119,6 +119,177 @@ check('a copy changed by one character differs',
 check('a step called twice is not read', run_script(lean + lean, 'Get the checker') is None)
 
 
+# Every run: step of the action runs in the shell lean.yml's jobs run in, written out: a composite
+# action has no defaults.
+def default_shell(lines):
+    m = re.search(r'^defaults:\n  run:\n    shell: (.+)$', '\n'.join(lines), re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def action_steps(lines):
+    """The action's steps, each as its lines: from one `    - ` to the next."""
+    steps, step = [], None
+    for line in lines:
+        if line.startswith('    - '):
+            step = [line]
+            steps.append(step)
+        elif step is not None and (not line.strip() or indent(line) > 4):
+            step.append(line)
+        elif step is not None and line.strip() and not line.lstrip().startswith('#'):
+            step = None
+    return steps
+
+
+def wrong_shells(lines, shell):
+    """The steps with a run: whose shell: is not exactly `shell`, by their first line."""
+    out = []
+    for step in action_steps(lines):
+        runs = step[0].startswith('    - run:') or any(line.startswith('      run:') for line in step)
+        shells = [line[len('      shell: '):] for line in step if line.startswith('      shell: ')]
+        if runs and shells != [shell]:
+            out.append(step[0].strip())
+    return out
+
+
+SHELL = default_shell(lean)
+check('lean.yml runs its jobs in bash --noprofile --norc -euo pipefail',
+      SHELL == 'bash --noprofile --norc -euo pipefail {0}')
+check("every run: step of the action has lean.yml's shell, exactly",
+      len(action_steps(action)) > 10 and wrong_shells(action, SHELL) == [])
+first_shell = action.index('      shell: ' + SHELL) if '      shell: ' + SHELL in action else 0
+check('... a step with another shell, or none, is found',
+      wrong_shells([line.replace('shell: bash --noprofile', 'shell: bash --profile', 1) for line in action], SHELL)
+      and wrong_shells(action[:first_shell] + action[first_shell + 1:], SHELL))
+
+
+# No run: script holds ${{ }}: an expression is written into the script before bash reads it, so an
+# input or a name would be read as code. Inputs reach a script through env: only.
+def run_blocks(lines):
+    """The text of every run: in the file: its inline value, or the lines of its block."""
+    out = []
+    for i, line in enumerate(lines):
+        m = re.fullmatch(r'( *)(- )?run:(.*)', line)
+        if not m:
+            continue
+        key = len(m.group(1)) + (2 if m.group(2) else 0)
+        value = m.group(3).strip()
+        if value in ('', '|', '|-', '>'):
+            body = []
+            for line2 in lines[i + 1:]:
+                if line2.strip() and indent(line2) <= key:
+                    break
+                body.append(line2)
+            out.append('\n'.join(body))
+        else:
+            out.append(value)
+    return out
+
+
+def expression_in_run(lines):
+    return [b for b in run_blocks(lines) if '${{' in b]
+
+
+check('no run: script in lean.yml or the action holds ${{',
+      len(run_blocks(lean)) > 5 and len(run_blocks(action)) > 10
+      and expression_in_run(lean) == [] and expression_in_run(action) == [])
+check('... an expression in a run: script is found, a block or one line',
+      expression_in_run([line.replace('va="$RUNNER_TEMP/va"', 'va="${{ runner.temp }}/va"', 1) for line in action])
+      and expression_in_run(lean + ['      - run: echo ${{ inputs.manifest }}']))
+
+
+# The schema the attestation is made for is vacheck's result schema, wherever a file names one.
+sys.path.insert(0, ROOT)
+from vacheck.result import SCHEMA  # noqa: E402
+SCHEMA_URL = re.compile(r'https://verificationalliance\.org/attestations/proof-check/v[0-9]+')
+SELFTEST = os.path.join(ROOT, '.github', 'workflows', 'selftest.yml')
+
+
+def schemas(lines):
+    return SCHEMA_URL.findall('\n'.join(lines))
+
+
+selftest = lines_of(SELFTEST)
+check('lean.yml signs under result.SCHEMA, selftest verifies under it, and the action names it',
+      any(line.strip() == 'predicate-type: ' + SCHEMA for line in lean)
+      and any(line.strip() == '--predicate-type %s \\' % SCHEMA for line in selftest)
+      and all(schemas(f) and set(schemas(f)) == {SCHEMA} for f in (lean, selftest, action)))
+check('... another schema is found',
+      set(schemas([line.replace(SCHEMA, SCHEMA[:-1] + '1') for line in lean])) != {SCHEMA})
+
+
+# The sanity helper and sanity-targets read the export, so each runs only in the sandbox, under the
+# step's limits (`limited`), with the export bound read-only, and with its output and its messages
+# in files, never in the log. Their commands are read with continued lines joined.
+def commands(script):
+    out, held = [], ''
+    for line in script.split('\n'):
+        if line.endswith('\\'):
+            held += line[:-1]
+            continue
+        out.append(held + line)
+        held = ''
+    return out
+
+
+# Each tool as the action runs it: what may start it after the sandbox's --, and what the sandbox
+# must bind read-only.
+SANDBOXED = {'"$work/sanity"': ('', ('--ro "$export_file"', '--ro "$work/targets.jsonl"')),
+             '"$va/vacheck.pyz" sanity-targets': ('/usr/bin/python3 -I ', ('--ro "$export_file"',))}
+
+
+def unsandboxed(lines):
+    """Problems with how the action runs the helper and sanity-targets; [] if none, and each runs."""
+    problems, runs = [], {tool: 0 for tool in SANDBOXED}
+    for script in run_blocks(lines):
+        for command in commands(script):
+            words = ' '.join(command.split())
+            for tool, (launcher, binds) in SANDBOXED.items():
+                for m in re.finditer(re.escape(tool), words):
+                    before = words[:m.start()]
+                    if before.endswith('--ro '):
+                        continue  # bound for the sandbox, not run
+                    runs[tool] += 1
+                    sandbox, sep, started = before.rpartition(' -- ')
+                    after = words[m.end():]
+                    if not (sep and started == launcher and re.match(r'(.* )?limited "\$va/sandbox" ', sandbox + ' ')
+                            and all(b in sandbox for b in binds)):
+                        problems.append('%s runs outside the limited sandbox, or without its export' % tool)
+                    if not (re.search(r' > "[^"]+"', after) and re.search(r' 2> "[^"]+"', after)):
+                        problems.append('%s writes to the log' % tool)
+    return problems + ['%s never runs' % t for t, n in runs.items() if n == 0]
+
+
+check('the sanity helper and sanity-targets run only in the limited sandbox, their output in files',
+      unsandboxed(action) == [])
+
+
+def edited(old, new):
+    text = '\n'.join(action)
+    if text.count(old) != 1:
+        return None
+    return text.replace(old, new).split('\n')
+
+
+for what, old, new in (
+        ('the helper run without the sandbox', 'limited "$va/sandbox" --ro "$lean" --ro "$work/sanity"',
+         'true --ro "$lean" --ro "$work/sanity"'),
+        ('the helper run without its limits', 'limited "$va/sandbox" --ro "$lean"', '"$va/sandbox" --ro "$lean"'),
+        ('the helper run without the export', '--ro "$work/targets.jsonl" --ro "$export_file"',
+         '--ro "$work/targets.jsonl"'),
+        ('the helper run a second time', '        touch "$va/sanity-done"\n',
+         '        "$work/sanity" "$work/targets.jsonl" "$export_file" > "$va/again" 2> "$work/again.log"\n'
+         '        touch "$va/sanity-done"\n'),
+        ("the helper's messages in the log", '> "$va/verdicts" 2> "$work/sanity.log"', '> "$va/verdicts"'),
+        ('sanity-targets run without the sandbox',
+         '-- /usr/bin/python3 -I "$va/vacheck.pyz" sanity-targets', '; /usr/bin/python3 -I "$va/vacheck.pyz" sanity-targets'),
+        ('sanity-targets run again, by another python3', '        python3 -I "$va/vacheck.pyz" sanity-source',
+         '        python3 -I "$va/vacheck.pyz" sanity-targets --export "$export_file" > "$work/t" 2> "$work/t.log"\n'
+         '        python3 -I "$va/vacheck.pyz" sanity-source'),
+        ("sanity-targets' output in the log", '> "$work/targets.jsonl" 2> "$work/targets.log"', '2> "$work/targets.log"')):
+    broken = edited(old, new)
+    check('... %s is found' % what, broken is not None and unsandboxed(broken) != [])
+
+
 
 # scripts/release.sh, in a repository of its own: this checkout's history may be shallow.
 def git(*args):
