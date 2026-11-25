@@ -600,25 +600,109 @@ def _under(env, e, tag):
     return e
 
 
-def binders(env, name, field):
+# The most steps that the binder walks of one claim may take (see Budget).
+MAX_STEPS = 1000000
+
+
+class OutOfSteps(Exception):
+    """A walk needed more steps than its Budget had left."""
+
+
+class Budget:
+    """The steps that the walks of one claim may still take, and the loose bound variables found so
+    far, which later walks reuse. A step is an expression reached, plus one per 256 bits of its set
+    of loose bound variables, so the budget bounds both time and memory."""
+
+    __slots__ = ('left', 'loose')
+
+    def __init__(self):
+        self.left = MAX_STEPS
+        self.loose = {}
+
+    def spend(self, steps):
+        self.left -= steps
+        if self.left < 0:
+            raise OutOfSteps()
+
+
+def _loose(env, root, budget):
+    """Records in budget.loose the loose bound variables of root and of every expression under it,
+    each a bitset: bit k is set when the expression mentions de Bruijn index k at its top.
+
+    An expression refers only to expressions read before it, so in id order each one's children are
+    done. Each expression is computed once, however many binders it sits under, so the cost is linear
+    in the expressions under root, where a walk per binder and per depth would be cubic."""
+    loose, exprs = budget.loose, env._exprs
+    todo, stack = set(), [root]
+    while stack:
+        e = stack.pop()
+        if e in loose or e in todo:
+            continue
+        budget.spend(1)
+        todo.add(e)
+        node = exprs[e]
+        stack.extend(node[i] for i in _EXPR_KIDS[node[0]])
+    for e in sorted(todo):
+        node = exprs[e]
+        tag = node[0]
+        if tag == 'bvar':
+            budget.spend(node[1] >> 8)  # before the bitset is made: an index can be huge
+            loose[e] = 1 << node[1]
+            continue
+        if tag == 'lam' or tag == 'forallE':
+            bits = loose[node[2]] | (loose[node[3]] >> 1)
+        elif tag == 'letE':
+            bits = loose[node[2]] | loose[node[3]] | (loose[node[4]] >> 1)
+        else:
+            bits = 0
+            for i in _EXPR_KIDS[tag]:
+                bits |= loose[node[i]]
+        budget.spend(bits.bit_length() >> 8)
+        loose[e] = bits
+
+
+def _chain(env, name, field):
     """The leading binders of the declaration's 'type' (its foralls) or 'value' (its lambdas), as
-    (name, binder info, used): the binder's name as Lean prints it, or None when it is anonymous or
-    has macro scopes (a component `_@`, as an arrow's hypothesis or `fun _ =>` gets), since a report
-    shows no such name; and whether the rest of the chain (later binder types and the body)
-    mentions its variable. [] for a value that is not a lambda, or a declaration without a value."""
+    (binder name id, binder info, the expression under the binder)."""
     d = env._decls[env._decl(name)]
-    tag = _CHAINS[field]
     out = []
-    if field not in d.fields:
-        return out
-    node = env._exprs[d.fields[field]]
-    while node[0] == tag:
-        _, binder, _, body, info = node
-        comps = env._components(binder)
-        plain = None if not comps or '_@' in comps else env._render(binder)
-        out.append((plain, info, env._mentions_bvar(body)))
-        node = env._exprs[body]
+    if field in d.fields:
+        tag, node = _CHAINS[field], env._exprs[d.fields[field]]
+        while node[0] == tag:
+            out.append((node[1], node[4], node[3]))
+            node = env._exprs[node[3]]
     return out
+
+
+def binder_chain(env, name, field):
+    """The leading binders of the declaration's 'type' (its foralls) or 'value' (its lambdas), as
+    (binder, binder info): binder is a handle for binder_name, so only the names asked for are
+    rendered. [] for a value that is not a lambda, or a declaration without a value."""
+    return [(binder, info) for binder, info, _ in _chain(env, name, field)]
+
+
+def binder_name(env, binder):
+    """A binder's name as Lean prints it, or None when it is anonymous or has macro scopes (a
+    component `_@`, as an arrow's hypothesis or `fun _ =>` gets): a report shows no such name."""
+    comps = env._components(binder)
+    return None if not comps or '_@' in comps else env._render(binder)
+
+
+def binder_uses(env, name, field, budget):
+    """For each binder of binder_chain, whether the rest of the chain (later binder types and the
+    body) mentions its variable. OutOfSteps when that takes more steps than the budget has left."""
+    chain = _chain(env, name, field)
+    if chain:
+        _loose(env, env._decls[env._decl(name)].fields[field], budget)
+    return [bool(budget.loose[body] & 1) for _, _, body in chain]
+
+
+def binders(env, name, field, budget=None):
+    """binder_chain and binder_uses together, as (name, binder info, used), every name rendered."""
+    budget = Budget() if budget is None else budget
+    uses = binder_uses(env, name, field, budget)
+    return [(binder_name(env, binder), info, used)
+            for (binder, info), used in zip(binder_chain(env, name, field), uses)]
 
 
 def ends_in_prop(env, name):

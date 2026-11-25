@@ -7,23 +7,32 @@ verdict, from the helper vacheck/sanity.lean:
   of its type, so the claim holds whatever that definition is;
 - always-true: a definition in the statement whose type ends in Prop and whose body, under its
   lambdas, is the constant True;
-- ignores-argument: such a definition, not always true, whose body never uses one of its explicit
+- ignores-argument: such a definition, not always true, whose value never uses one of its explicit
   arguments;
-- unused-assumption: an explicit binder of the statement whose variable the proof's matching lambda
-  never mentions. A proof that is not a lambda, or has fewer lambdas, is not judged past them.
+- unused-assumption: an explicit binder of the statement that neither the rest of the statement nor
+  the proof's matching lambda mentions. A proof that is not a lambda, or has fewer lambdas, is not
+  judged past them.
 
-A binder with no plain name (anonymous, or with macro scopes, as an arrow's hypothesis has) is
-named None, and the report says "one of its ...". Warnings never fail a check. The helper's verdicts
-are read as strictly as the export: anything but one well-formed verdict per pair, in order, is a
-SanityError, never fewer warnings.
+Names are as the page prints them. It prints a declaration's binders with its type's names, which
+may not be its value's own: leanexport shares one expression among those equal but for binder names
+and binder info. So a binder's name and explicitness come from the type, and its use from the value.
+A binder name the page may not show (none, macro scopes, over MAX_NAME characters, a character a
+report cannot show, or one the caller's `shown` rejects) is None, and the report says "one of its
+...". The binder walks of one claim share an export.Budget; past it, the claim gets no warning read
+off binders, as the helper skips a re-check out of heartbeats. Warnings never fail a check.
+
+The helper's verdicts are read as strictly as the export: anything but one well-formed verdict per
+pair, in order, is a SanityError, never fewer warnings.
 """
 import pkgutil
 
-from .export import binders, body_constant, ends_in_prop, universe_params
+from .export import (Budget, OutOfSteps, binder_chain, binder_name, binder_uses, body_constant, ends_in_prop,
+                     universe_params)
 
 # The most serious first: the order of a claim's warnings.
 CHECKS = ('no-project-definition', 'holds-for-any', 'always-true', 'ignores-argument', 'unused-assumption')
 MAX_WARNINGS = 10
+MAX_NAME = 200  # the longest binder name a warning names; a longer one is None
 VERDICTS = ('any', 'needed', 'skipped')  # what the helper says of one (theorem, definition) pair
 
 
@@ -72,31 +81,63 @@ def read_verdicts(text, targets):
     return {t: frozenset(ds) for t, ds in found.items()}
 
 
-def warnings(export, theorem, defs, any_defs):
+def warnings(export, theorem, defs, any_defs, shown=None):
     """The claim's warnings, each {'check', 'name', 'arg'}: in CHECKS order, then in the order of
     defs or of the statement's binders, and at most MAX_WARNINGS.
 
     defs are the project's definitions in the statement, as analyze lists them; any_defs, those of
-    them the helper found the proof holds for any value of.
+    them the helper found the proof holds for any value of. shown, when given, takes a binder's name
+    and says whether the page shows it; it is asked only about the names the warnings would give.
     """
     if not set(any_defs) <= set(defs):
         raise SanityError('a verdict names a definition the statement does not mention')
-    found = {check: [] for check in CHECKS}
-    if not defs:
-        found['no-project-definition'].append((None, None))
-    for d in defs:
-        if d in any_defs:
-            found['holds-for-any'].append((d, None))
-        if export.kind(d) == 'def' and ends_in_prop(export, d):
-            if body_constant(export, d) == 'True':
-                found['always-true'].append((d, None))
-            else:
-                for arg, arg_info, arg_used in binders(export, d, 'value'):
-                    if arg_info == 'default' and not arg_used:
-                        found['ignores-argument'].append((d, arg))
-    statement, proof = binders(export, theorem, 'type'), binders(export, theorem, 'value')
-    for (name, info, _), (_, _, used_by_proof) in zip(statement, proof):
-        if info == 'default' and not used_by_proof:
-            found['unused-assumption'].append((name, None))
-    return [{'check': check, 'name': name, 'arg': arg}
-            for check in CHECKS for name, arg in found[check]][:MAX_WARNINGS]
+    props = [d for d in defs if export.kind(d) == 'def' and ends_in_prop(export, d)]
+    always = [d for d in props if body_constant(export, d) == 'True']
+    found = {'no-project-definition': [] if defs else [(None, None)],
+             'holds-for-any': [(d, None) for d in defs if d in any_defs],
+             'always-true': [(d, None) for d in always]}
+    try:
+        budget = Budget()
+        found['ignores-argument'] = [(d, arg) for d in props if d not in always for arg in _ignored(export, d, budget)]
+        found['unused-assumption'] = [(h, None) for h in _unused(export, theorem, budget)]
+    except OutOfSteps:
+        found['ignores-argument'] = found['unused-assumption'] = []
+    kept = [(check, name, arg) for check in CHECKS for name, arg in found[check]][:MAX_WARNINGS]
+    return [{'check': check,
+             'name': _named(export, name, shown) if check == 'unused-assumption' else name,
+             'arg': _named(export, arg, shown) if check == 'ignores-argument' else arg}
+            for check, name, arg in kept]
+
+
+def _ignored(export, d, budget):
+    """The explicit arguments of definition d that its value never uses, as binder handles: named and
+    made explicit by d's type, used or not by its value."""
+    uses = binder_uses(export, d, 'value', budget)
+    return [arg for (arg, arg_info), arg_used in zip(binder_chain(export, d, 'type'), uses)
+            if arg_info == 'default' and not arg_used]
+
+
+def _unused(export, theorem, budget):
+    """The explicit binders of the statement that neither the rest of the statement nor the proof's
+    matching lambda mentions, as binder handles. A binder the statement mentions is what the claim is
+    about, not an assumption: by proof irrelevance, the proof of `(h1 h2 : 1 = 1) : f h1 = f h2` may
+    well mention only h1. The statement is walked only when the proof leaves a binder unused."""
+    statement = binder_chain(export, theorem, 'type')
+    proof = binder_uses(export, theorem, 'value', budget)
+    unused = [k for k, ((_, info), used_by_proof) in enumerate(zip(statement, proof))
+              if info == 'default' and not used_by_proof]
+    if not unused:
+        return []
+    stated = binder_uses(export, theorem, 'type', budget)
+    return [statement[k][0] for k in unused if not stated[k]]
+
+
+def _named(export, binder, shown):
+    """A binder's name for a warning, or None when it has no plain name, is longer than MAX_NAME,
+    holds a character a report cannot show, or shown says the page does not show it."""
+    # Imported here, not above: the result contract reads CHECKS from this module.
+    from .result import hidden_character
+    name = binder_name(export, binder)
+    if name is None or len(name) > MAX_NAME or hidden_character(name) is not None:
+        return None
+    return name if shown is None or shown(name) else None

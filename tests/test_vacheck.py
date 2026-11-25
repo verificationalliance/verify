@@ -268,6 +268,7 @@ check('Manifest and Claim field types match the interface',
 import re  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
+import time  # noqa: E402
 
 try:
     from vacheck import export as vx  # noqa: E402
@@ -626,10 +627,10 @@ WANT = {'Weak.prog_safe': [('holds-for-any', 'Weak.prog', None), ('always-true',
         'Weak.by_lemma': [('no-project-definition', None, None)]}
 
 
-def got(t, any_=None, env=None, defs=None):
+def got(t, any_=None, env=None, defs=None, shown=None):
     """The warnings of theorem t as (check, name, arg): weak's, unless env and defs are given."""
     ws = sanity.warnings(W if env is None else env, t, DEFS[t] if defs is None else defs,
-                         ANY.get(t, set()) if any_ is None else any_)
+                         ANY.get(t, set()) if any_ is None else any_, **({} if shown is None else {'shown': shown}))
     if not all(type(w) is dict and list(w) == ['check', 'name', 'arg'] for w in ws):
         print('      not {check, name, arg}: %r' % ws)
         return None
@@ -653,36 +654,158 @@ check('sanity: a verdict for a definition the statement does not mention is an e
 check('sanity: targets keep monomorphic defs, in order',
       attempt(lambda: sanity.targets(G, ['Good.anyIn_nil'], {'Good.anyIn_nil': ['Good.Range', 'Good.anyIn']}))
       == [('Good.anyIn_nil', ('Good.anyIn',))])
-# P (n : Nat) {m : Nat} : Prop := False ignores n, but m is not explicit; Q : Nat → Prop := fun x => False
-# ignores an argument with macro scopes (x._@.M._hyg.1); U.{u} : Sort u has a universe parameter. The proof
-# of t (a : Nat) {b : Nat} : Q a, fun a b => True.intro, uses neither a nor b, though the statement uses a.
-SHAPES = [META] + ['{"in":%d,"str":{"pre":%d,"str":"%s"}}' % (i + 1, pre, s) for i, (pre, s) in enumerate(
-    [(0, 'True'), (1, 'intro'), (0, 'False'), (0, 'Nat'), (0, 'P'), (0, 'Q'), (0, 'U'), (0, 't'), (0, 'n'),
-     (0, 'm'), (0, 'a'), (0, 'b'), (0, 'x'), (13, '_@'), (14, 'M'), (15, '_hyg')])] + [
-    '{"in":17,"num":{"pre":16,"i":1}}', '{"in":18,"str":{"pre":0,"str":"u"}}', '{"il":1,"param":18}', SORT,
-    '{"ie":1,"const":{"name":1,"us":[]}}', '{"ie":2,"const":{"name":2,"us":[]}}',
-    '{"ie":3,"const":{"name":3,"us":[]}}', '{"ie":4,"const":{"name":4,"us":[]}}',
-    '{"ie":5,"const":{"name":6,"us":[]}}', '{"ie":6,"bvar":1}',
-    '{"ie":7,"forallE":{"name":10,"type":4,"body":0,"binderInfo":"implicit"}}',
-    '{"ie":8,"forallE":{"name":9,"type":4,"body":7,"binderInfo":"default"}}',
-    '{"ie":9,"lam":{"name":10,"type":4,"body":3,"binderInfo":"implicit"}}',
-    '{"ie":10,"lam":{"name":9,"type":4,"body":9,"binderInfo":"default"}}',
-    '{"ie":11,"forallE":{"name":17,"type":4,"body":0,"binderInfo":"default"}}',
-    '{"ie":12,"lam":{"name":17,"type":4,"body":3,"binderInfo":"default"}}', '{"ie":13,"sort":1}',
-    '{"ie":14,"app":{"fn":5,"arg":6}}', '{"ie":15,"forallE":{"name":12,"type":4,"body":14,"binderInfo":"implicit"}}',
-    '{"ie":16,"forallE":{"name":11,"type":4,"body":15,"binderInfo":"default"}}',
-    '{"ie":17,"lam":{"name":12,"type":4,"body":2,"binderInfo":"implicit"}}',
-    '{"ie":18,"lam":{"name":11,"type":4,"body":17,"binderInfo":"default"}}'] + [
-    '{"def":{"name":%d,"levelParams":%s,"type":%d,"value":%d,"hints":"abbrev","safety":"safe","all":[%d]}}'
-    % (n, ps, t, v, n) for n, ps, t, v in ((5, '[]', 8, 10), (6, '[]', 11, 12), (7, '[18]', 13, 1))] + [
-    '{"thm":{"name":8,"levelParams":[],"type":16,"value":18,"all":[8]}}']
-shapes = attempt(lambda: vx.load_export(export_file(SHAPES)))
+
+
+class Build:
+    """A synthetic export, written record by record."""
+
+    def __init__(self):
+        self.lines, self._names, self._exprs, self._levels = [META], {}, 0, 1
+
+    def name(self, *comps):
+        """The id of the name with these components (a str for Name.str, an int for Name.num); 0 for none."""
+        pre = 0
+        for comp in comps:
+            if (pre, comp) not in self._names:
+                self._names[pre, comp] = i = len(self._names) + 1
+                kind, part = (('num', {'pre': pre, 'i': comp}) if type(comp) is int
+                              else ('str', {'pre': pre, 'str': comp}))
+                self.lines.append(json.dumps({'in': i, kind: part}))
+            pre = self._names[pre, comp]
+        return pre
+
+    def param(self, name):
+        self.lines.append(json.dumps({'il': self._levels, 'param': self.name(name)}))
+        self._levels += 1
+        return self._levels - 1
+
+    def expr(self, tag, value):
+        self.lines.append(json.dumps({'ie': self._exprs, tag: value}))
+        self._exprs += 1
+        return self._exprs - 1
+
+    def const(self, *comps):
+        return self.expr('const', {'name': self.name(*comps), 'us': []})
+
+    def bind(self, tag, binder, type_, body, info='default'):
+        """A lam or forallE whose binder's name has the components `binder`: () for none."""
+        return self.expr(tag, {'name': self.name(*binder), 'type': type_, 'body': body, 'binderInfo': info})
+
+    def define(self, name, type_, value, params=()):
+        n, ps = self.name(name), [self.name(p) for p in params]
+        self.lines.append(json.dumps({'def': {'name': n, 'levelParams': ps, 'type': type_, 'value': value,
+                                              'hints': 'abbrev', 'safety': 'safe', 'all': [n]}}))
+
+    def theorem(self, name, type_, value):
+        n = self.name(name)
+        self.lines.append(json.dumps({'thm': {'name': n, 'levelParams': [], 'type': type_, 'value': value,
+                                              'all': [n]}}))
+
+    def env(self):
+        return vx.load_export(export_file(self.lines))
+
+
+def chain(b, tag, binders, body):
+    """Binders (components, info), outermost first, around body; every binder's type is Nat."""
+    for comps, info in reversed(binders):
+        body = b.bind(tag, comps, b.const('Nat'), body, info)
+    return body
+
+
+HYG = ('x', '_@', 'M', '_hyg', 1)  # a name with macro scopes, as `x✝` is
+b = Build()
+PROP, FALSE, INTRO = b.expr('sort', 0), b.const('False'), b.const('True', 'intro')
+# leanexport shares one expression among those equal but for binder names and info, so a definition's
+# type may carry other binders than its value, and the page prints the type's. P's type is
+# ∀ (n : Nat) (x✝ : Nat) {m : Nat}, Prop; its value, fun (m : Nat) (n : Nat) (q : Nat) => m, ignores
+# its second argument (x✝ on the page) and its third, which is implicit.
+b.define('P', chain(b, 'forallE', [(('n',), 'default'), (HYG, 'default'), (('m',), 'implicit')], PROP),
+         chain(b, 'lam', [(('m',), 'default'), (('n',), 'default'), (('q',), 'default')], b.expr('bvar', 2)))
+# Q : ∀ (p.q : Nat), Prop := fun y => False ignores p.q, a binder name of two components.
+b.define('Q', chain(b, 'forallE', [(('p', 'q'), 'default')], PROP), chain(b, 'lam', [(('y',), 'default')], FALSE))
+b.define('U', b.expr('sort', b.param('u')), b.const('True'), params=('u',))  # U.{u} : Sort u
+# t (a : Nat) {b : Nat} (c : Nat) (d : Nat) : Q a := fun a b r s => True.intro s. The proof uses only d,
+# and the statement only a: c is the one assumption the proof never uses (the proof calls it r).
+Q_A = b.expr('app', {'fn': b.const('Q'), 'arg': b.expr('bvar', 3)})
+b.theorem('t', chain(b, 'forallE', [(('a',), 'default'), (('b',), 'implicit'), (('c',), 'default'),
+                                    (('d',), 'default')], Q_A),
+          chain(b, 'lam', [(('a',), 'default'), (('b',), 'default'), (('r',), 'default'), (('s',), 'default')],
+                b.expr('app', {'fn': INTRO, 'arg': b.expr('bvar', 0)})))
+# names : ∀ (a…a : Nat) (a…a : Nat) (x\u202ey : Nat) (ok : Nat), True := fun _ _ _ _ => True.intro, with names of
+# 200 and 201 characters and one holding U+202E: only those a report can show are named.
+NAMES = ['a' * 200, 'a' * 201, 'x\u202ey', 'ok']
+b.theorem('names', chain(b, 'forallE', [((n,), 'default') for n in NAMES], b.const('True')),
+          chain(b, 'lam', [((n,), 'default') for n in NAMES], INTRO))
+# big : ∀ (x : Nat), True := fun x => #(2^40): a bound variable whose set of indices would not fit.
+b.theorem('big', chain(b, 'forallE', [(('x',), 'default')], b.const('True')),
+          chain(b, 'lam', [(('x',), 'default')], b.expr('bvar', 2 ** 40)))
+shapes = attempt(b.env)
+T_WANT = [('holds-for-any', 'P', None), ('ignores-argument', 'Q', 'p.q'), ('ignores-argument', 'P', None),
+          ('unused-assumption', 'c', None)]
 check('sanity: targets drop a definition with universe parameters, and a name that is not a def',
       attempt(lambda: sanity.targets(shapes, ['t'], {'t': ['Q', 'U', 'P', 'Nat']})) == [('t', ('Q', 'P'))])
-check('sanity: ignores-argument and unused-assumption judge explicit binders by the proof, in order',
-      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P']))
-      == [('holds-for-any', 'P', None), ('ignores-argument', 'Q', None), ('ignores-argument', 'P', 'n'),
-          ('unused-assumption', 'a', None)])
+check("sanity: an argument's name and explicitness come from the definition's type, its use from the value",
+      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'])) == T_WANT)
+check('sanity: an assumption is judged only when the rest of the statement does not mention it',
+      attempt(lambda: [w for w in got('t', set(), shapes, ['Q']) if w[0] == 'unused-assumption'])
+      == [('unused-assumption', 'c', None)])
+asked = []
+check('sanity: a name the page does not show is None, and only warned names are asked about',
+      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'], shown=lambda n: asked.append(n) or n != 'c'))
+      == T_WANT[:3] + [('unused-assumption', None, None)] and asked == ['p.q', 'c'])
+asked_names = []
+check('sanity: a name over 200 characters, or with a character a report cannot show, is None',
+      attempt(lambda: got('names', set(), shapes, [], shown=lambda n: asked_names.append(n) or True))
+      == [('no-project-definition', None, None), ('unused-assumption', 'a' * 200, None),
+          ('unused-assumption', None, None), ('unused-assumption', None, None), ('unused-assumption', 'ok', None)]
+      and asked_names == ['a' * 200, 'ok'])
+
+
+def with_steps(n, fn):
+    """fn() with vx.MAX_STEPS set to n."""
+    old = vx.MAX_STEPS
+    vx.MAX_STEPS = n
+    try:
+        return fn()
+    finally:
+        vx.MAX_STEPS = old
+
+
+check('sanity: binder walks past their budget give no binder warning, and keep the others',
+      attempt(lambda: with_steps(5, lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'])))
+      == [('holds-for-any', 'P', None)]
+      and attempt(lambda: got('big', set(), shapes, [])) == [('no-project-definition', None, None)]
+      # Q's walk ends within the budget, and big's proof runs it out: Q's warning goes too.
+      and attempt(lambda: got('big', {'Q'}, shapes, ['Q'])) == [('holds-for-any', 'Q', None)])
+
+
+def hostile(d, m, in_proof):
+    """D binders around a term of M nodes, each under up to M binders: L(0) is a bound variable none of
+    them binds, and L(k) is ∀ (_ : L(k-1)), L(k-1). The theorem h is ∀ x0 … x(D-1), L(M), proved by
+    fun x0 … => True.intro; or, with the term in the proof only, ∀ x0 …, True := fun x0 … => L(M)."""
+    b = Build()
+    term = b.expr('bvar', d + m)
+    for _ in range(m):
+        term = b.bind('forallE', (), term, term)
+    stmt, proof = (b.const('True'), term) if in_proof else (term, b.const('True', 'intro'))
+    xs = [(('x%d' % i,), 'default') for i in range(d)]
+    b.theorem('h', chain(b, 'forallE', xs, stmt), chain(b, 'lam', xs, proof))
+    return b.env()
+
+
+def timed(env):
+    t0 = time.monotonic()
+    out = got('h', set(), env, [])
+    secs = time.monotonic() - t0
+    print('      %.2f s' % secs)
+    return out, secs < 2
+
+
+H_WANT = ([('no-project-definition', None, None)] + [('unused-assumption', 'x%d' % i, None) for i in range(9)], True)
+check('sanity: 1600 binders over a shared term of 1600 nodes, in the statement, in under 2 s',
+      attempt(lambda: timed(hostile(1600, 1600, False))) == H_WANT)
+check('sanity: 100 binders over a shared term of 6000 nodes, in the proof only, in under 2 s',
+      attempt(lambda: timed(hostile(100, 6000, True))) == H_WANT)
 
 
 def props_export(n):
