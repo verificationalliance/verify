@@ -166,14 +166,14 @@ class Env:
     def components(self):
         """Every declaration's name as the tuple of its components: a str for Name.str, an int for
         Name.num. Unlike the printed names, these are exact: they are what Lean's Name is."""
-        out = []
-        for c in self._decls:
-            comps = []
-            while c != 0:
-                c, comp = self._parts[c]
-                comps.append(comp)
-            out.append(tuple(reversed(comps)))
-        return out
+        return [self._components(c) for c in self._decls]
+
+    def _components(self, c):
+        comps = []
+        while c != 0:
+            c, comp = self._parts[c]
+            comps.append(comp)
+        return tuple(reversed(comps))
 
     def names(self):
         if self._names is None:
@@ -587,6 +587,65 @@ def fields(env, ctor):
             out.append((comp if plain else None, info, env._mentions_bvar(body)))
         e = body
     return out
+
+
+# The binder chains a declaration starts with: its type's foralls, its value's lambdas.
+_CHAINS = {'type': 'forallE', 'value': 'lam'}
+
+
+def _under(env, e, tag):
+    """The expression under e's leading binders of kind tag."""
+    while env._exprs[e][0] == tag:
+        e = env._exprs[e][3]
+    return e
+
+
+def binders(env, name, field):
+    """The leading binders of the declaration's 'type' (its foralls) or 'value' (its lambdas), as
+    (name, binder info, used): the binder's name as Lean prints it, or None when it is anonymous or
+    has macro scopes (a component `_@`, as an arrow's hypothesis or `fun _ =>` gets), since a report
+    shows no such name; and whether the rest of the chain (later binder types and the body)
+    mentions its variable. [] for a value that is not a lambda, or a declaration without a value."""
+    d = env._decls[env._decl(name)]
+    tag = _CHAINS[field]
+    out = []
+    if field not in d.fields:
+        return out
+    node = env._exprs[d.fields[field]]
+    while node[0] == tag:
+        _, binder, _, body, info = node
+        comps = env._components(binder)
+        plain = None if not comps or '_@' in comps else env._render(binder)
+        out.append((plain, info, env._mentions_bvar(body)))
+        node = env._exprs[body]
+    return out
+
+
+def ends_in_prop(env, name):
+    """Whether the declaration's type, after its leading foralls, is Prop: a sort of level zero."""
+    d = env._decls[env._decl(name)]
+    node = env._exprs[_under(env, d.fields['type'], 'forallE')]
+    return node[0] == 'sort' and env._levels[node[1]] == ('zero',)
+
+
+def body_constant(env, name):
+    """The declaration's value under its leading lambdas, as Lean prints it, when that is a bare
+    constant; otherwise None, as for a declaration without a value."""
+    d = env._decls[env._decl(name)]
+    if 'value' not in d.fields:
+        return None
+    node = env._exprs[_under(env, d.fields['value'], 'lam')]
+    return env._render(node[1]) if node[0] == 'const' else None
+
+
+def universe_params(env, name):
+    """The number of the declaration's universe parameters."""
+    return len(env._decls[env._decl(name)].fields['levelParams'])
+
+
+def name_components(env, name):
+    """The declaration's name as the tuple of its components, exactly as Env.components gives them."""
+    return env._components(env._decl(name))
 
 
 def digest(env, name):

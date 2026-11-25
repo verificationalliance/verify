@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "project": "tests/fixtures/weak",
+  "modules": ["Weak"],
+  "ships": [],
+  "claims": [
+    {"says": "The program is safe.", "theorem": "Weak.prog_safe", "about": "model"},
+    {"says": "Sorting 3, 1, 2 gives a sorted list.", "theorem": "Weak.sort_example", "about": "model"},
+    {"says": "Adding zero to a valid number leaves it unchanged.", "theorem": "Weak.add_zero_of_valid", "about": "model"},
+    {"says": "Sorting keeps the length of a list.", "theorem": "Weak.sort_length_self", "about": "model"},
+    {"says": "Sorting a number below 2 and above 5 gives the empty list.", "theorem": "Weak.vacuous", "about": "model"},
+    {"says": "Adding zero to a number leaves it unchanged.", "theorem": "Weak.no_project", "about": "model"},
+    {"says": "Adding zero to one gives one when one is valid.", "theorem": "Weak.arrow", "about": "model"},
+    {"says": "Adding zero to any number leaves it unchanged.", "theorem": "Weak.by_lemma", "about": "model"}
+  ]
+}

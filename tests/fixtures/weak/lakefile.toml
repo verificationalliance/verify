@@ -1,0 +1,5 @@
+name = "weak"
+defaultTargets = ["Weak"]
+
+[[lean_lib]]
+name = "Weak"

@@ -560,6 +560,40 @@ FIRST = HEAD + b'a' + TAIL
 check('export line over 64 MB rejected', export_rejected(
     [META, FIRST + b' ' * (MAX_LINE + 1 - len(FIRST)) + NAME_X.encode()]))
 
+# What the sanity checks read off the export: binders, Prop-valued definitions, constant bodies.
+W = attempt(lambda: vx.load_export(os.path.join(FIXTURES, 'weak.ndjson')))
+G = good
+check('binders: a statement by name, info and use',
+      attempt(lambda: vx.binders(W, 'Weak.add_zero_of_valid', 'type')) == [('n', 'default', True), ('h', 'default', False)])
+check('binders: the proof of add_zero_of_valid never uses h',
+      attempt(lambda: [u for _, _, u in vx.binders(W, 'Weak.add_zero_of_valid', 'value')][:2]) == [True, False])
+check('binders: a hygienic binder has no plain name',
+      attempt(lambda: vx.binders(W, 'Weak.arrow', 'type')) == [(None, 'default', False)]
+      and attempt(lambda: vx.binders(W, 'Weak.sort_length_self', 'value')) == [(None, 'default', True)])
+check('binders: a proof that is not a lambda has none',
+      attempt(lambda: vx.binders(W, 'Weak.by_lemma', 'value')) == []
+      and attempt(lambda: vx.binders(G, 'propext', 'value')) == [])
+check('binders: a chain ends at the first binder of another kind (Not is fun a => a → False)',
+      attempt(lambda: vx.binders(G, 'Not', 'value')) == [('a', 'default', True)])
+ANON = [META, '{"in":1,"str":{"pre":0,"str":"t"}}', SORT, '{"ie":1,"bvar":0}',
+        '{"ie":2,"forallE":{"name":0,"type":0,"body":1,"binderInfo":"implicit"}}',
+        '{"ie":3,"lam":{"name":0,"type":0,"body":1,"binderInfo":"instImplicit"}}',
+        '{"thm":{"name":1,"levelParams":[],"type":2,"value":3,"all":[1]}}']
+check('binders: an anonymous binder has no name, and keeps its binder info',
+      attempt(lambda: (lambda env: (vx.binders(env, 't', 'type'), vx.binders(env, 't', 'value')))(
+          vx.load_export(export_file(ANON)))) == ([(None, 'implicit', True)], [(None, 'instImplicit', True)]))
+check('ends_in_prop: Safe and Valid, not sort',
+      attempt(lambda: vx.ends_in_prop(W, 'Weak.Safe') and vx.ends_in_prop(W, 'Weak.Valid')
+              and not vx.ends_in_prop(W, 'Weak.sort')) is True)
+check('ends_in_prop: a type ending in another sort is not Prop (List, Nat)',
+      attempt(lambda: vx.ends_in_prop(W, 'List') or vx.ends_in_prop(W, 'Nat')) is False)
+check('body_constant: Safe is True, Valid is none',
+      attempt(lambda: vx.body_constant(W, 'Weak.Safe') == 'True' and vx.body_constant(W, 'Weak.Valid') is None) is True)
+check('universe_params: sort none, List one',
+      attempt(lambda: vx.universe_params(W, 'Weak.sort') == 0 and vx.universe_params(W, 'List') == 1) is True)
+check('name_components: a guillemet name',
+      attempt(lambda: vx.name_components(G, 'Good.«key never leaves»')) == ('Good', 'key never leaves'))
+
 # Supported toolchains.
 try:
     from vacheck import toolchain as vt  # noqa: E402

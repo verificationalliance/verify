@@ -28,3 +28,4 @@ export_case axiom Axiom Axiom.magic Axiom.t
 export_case native Native Native.t
 export_case fakeeq FakeEq Eq Eq.any Eq.rec Eq.recOn FakeEq.t
 export_case replaced Replaced Replaced.doubleImpl Replaced.double Replaced.double_eq
+export_case weak Weak Weak.prog_safe Weak.sort_example Weak.add_zero_of_valid Weak.sort_length_self Weak.vacuous Weak.no_project Weak.arrow Weak.by_lemma
