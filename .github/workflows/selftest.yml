@@ -110,7 +110,7 @@ jobs:
   good-again:
     needs: good
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     permissions:
       contents: read
       actions: read
@@ -178,8 +178,8 @@ jobs:
           test "$PRINTLN" = success
           test "$SORRY" = failure
 
-      # The sanity checks: weak's and good's claims, in order, each with the warnings that
-      # tests/test_cli.py expects of the same fixtures.
+      # The sanity checks: the helper ran to the end, and weak's and good's claims, in order, each
+      # have the warnings that tests/test_cli.py expects of the same fixtures.
       - name: weak and good have the expected warnings
         env:
           WEAK: ${{ needs.weak.outputs.result }}
@@ -208,7 +208,8 @@ jobs:
           for var, want in WANT.items():
               result = json.loads(base64.b64decode(os.environ[var], validate=True))
               got = [(c['theorem'], [(w['check'], w['name'], w['arg']) for w in c['warnings']]) for c in result['claims']]
-              print(var.lower(), result['schema'], got == want)
+              print(var.lower(), result['schema'], result['sanity'], got == want)
+              assert result['sanity'] == 'complete', result['sanity']
               assert got == want, got
           EOF
 

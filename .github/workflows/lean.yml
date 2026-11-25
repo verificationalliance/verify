@@ -345,11 +345,13 @@ jobs:
   # every action is. It is named in full, not as ./.github/actions/check: a called workflow would
   # look for ./ in its caller's checkout. scripts/release.sh refuses a release in which that
   # commit's action is not the release's own. The steps and their comments are in the action.
+  # 240 minutes: the kernels' replay of a large export, then the sanity step's own 30-minute safety
+  # net, which must not be what stops the job.
   check:
     name: check
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     permissions:
       contents: read
     outputs:
