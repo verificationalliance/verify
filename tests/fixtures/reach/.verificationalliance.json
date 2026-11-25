@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "project": "tests/fixtures/reach",
+  "modules": ["Reach"],
+  "ships": [],
+  "claims": [
+    {"says": "20 is high.", "theorem": "Reach.safe", "about": "model"},
+    {"says": "2 is even or odd.", "theorem": "Reach.even_two", "about": "model"}
+  ]
+}

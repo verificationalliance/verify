@@ -4,7 +4,8 @@ Each warning is a fact. Four are read off the checked export; holds-for-any is t
 verdict, from the helper vacheck/sanity.lean:
 - no-project-definition: the statement names none of the project's definitions;
 - holds-for-any: the kernel accepts the developer's proof with a definition replaced by a variable
-  of its type, so the claim holds whatever that definition is;
+  of its type, so the claim holds whatever that definition is. It is tried only for a definition
+  that no other constant of the statement reaches (targets);
 - always-true: a definition in the statement whose type ends in Prop and whose body, under its
   lambdas, is the constant True;
 - ignores-argument: such a definition, not always true, whose value never uses one of its explicit
@@ -28,8 +29,8 @@ pair, in order, is a SanityError, never fewer warnings.
 """
 import pkgutil
 
-from .export import (Budget, OutOfSteps, binder_chain, binder_name, binder_uses, body_constant, ends_in_prop,
-                     universe_params)
+from .export import (Budget, OutOfSteps, binder_chain, binder_name, binder_uses, body_constant, constants_in_type,
+                     ends_in_prop, reaches, universe_params)
 
 # The most serious first: the order of a claim's warnings.
 CHECKS = ('no-project-definition', 'holds-for-any', 'always-true', 'ignores-argument', 'unused-assumption')
@@ -50,9 +51,19 @@ def source():
 
 def targets(export, theorems, defs):
     """The pairs the helper re-checks: for each theorem, in order, the names in defs[theorem], in
-    order, that are definitions without universe parameters."""
-    return [(t, tuple(d for d in defs[t] if export.kind(d) == 'def' and universe_params(export, d) == 0))
-            for t in theorems]
+    order, that are definitions without universe parameters and that no other constant of the
+    statement reaches (export.reaches).
+
+    The helper replaces a definition only where the statement names it. Where another constant of
+    the statement is made of it (`isHigh n := n > threshold` in `isHigh 20 = true`), the kernel may
+    accept the proof with it replaced, yet the claim does not hold whatever it is: such a pair is never
+    tried, and gives no warning."""
+    out = []
+    for t in theorems:
+        stated = constants_in_type(export, t)
+        out.append((t, tuple(d for d in defs[t] if export.kind(d) == 'def' and universe_params(export, d) == 0
+                             and not reaches(export, stated - {d}, d))))
+    return out
 
 
 def read_verdicts(text, targets):

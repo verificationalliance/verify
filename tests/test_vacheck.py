@@ -700,6 +700,22 @@ check('sanity: a verdict for a definition the statement does not mention is an e
 check('sanity: targets keep monomorphic defs, in order',
       attempt(lambda: sanity.targets(G, ['Good.anyIn_nil'], {'Good.anyIn_nil': ['Good.Range', 'Good.anyIn']}))
       == [('Good.anyIn_nil', ('Good.anyIn',))])
+# The re-check replaces a definition only where the statement names it, so it tries one only when no
+# other constant of the statement reaches it: isHigh is made of threshold, and even and odd are one
+# mutual block, compiled to helpers that name neither.
+R = attempt(lambda: vx.load_export(os.path.join(FIXTURES, 'reach.ndjson')))
+check('sanity: targets skip a definition another constant of the statement reaches, and a mutual block',
+      attempt(lambda: sanity.targets(R, ['Reach.safe', 'Reach.even_two'],
+                                     {'Reach.safe': ['Reach.isHigh', 'Reach.threshold'],
+                                      'Reach.even_two': ['Reach.even', 'Reach.odd']}))
+      == [('Reach.safe', ('Reach.isHigh',)), ('Reach.even_two', ())])
+check('sanity: the weak and good statements reach none of their other definitions',
+      attempt(lambda: sanity.targets(W, ['Weak.prog_safe', 'Weak.sort_example'],
+                                     {'Weak.prog_safe': ['Weak.Safe', 'Weak.prog'],
+                                      'Weak.sort_example': ['Weak.Sorted', 'Weak.sort']}))
+      == [('Weak.prog_safe', ('Weak.Safe', 'Weak.prog')), ('Weak.sort_example', ('Weak.Sorted', 'Weak.sort'))]
+      and attempt(lambda: sanity.targets(G, ['Good.pick_lowest'], {'Good.pick_lowest': ['Good.lowest', 'Good.pick']}))
+      == [('Good.pick_lowest', ('Good.lowest', 'Good.pick'))])
 
 
 class Build:
@@ -738,7 +754,9 @@ class Build:
         return self.expr(tag, {'name': self.name(*binder), 'type': type_, 'body': body, 'binderInfo': info})
 
     def define(self, name, type_, value, params=()):
-        n, ps = self.name(name), [self.name(p) for p in params]
+        """A definition named `name`, or the components of a tuple `name`."""
+        n = self.name(*name) if isinstance(name, tuple) else self.name(name)
+        ps = [self.name(p) for p in params]
         self.lines.append(json.dumps({'def': {'name': n, 'levelParams': ps, 'type': type_, 'value': value,
                                               'hints': 'abbrev', 'safety': 'safe', 'all': [n]}}))
 
@@ -810,6 +828,18 @@ T_WANT = [('holds-for-any', 'P', None), ('ignores-argument', 'Q', 'p.q'), ('igno
           ('unused-assumption', 'c', None)]
 check('sanity: targets drop a definition with universe parameters, and a name that is not a def',
       attempt(lambda: sanity.targets(shapes, ['t'], {'t': ['Q', 'U', 'P', 'Nat']})) == [('t', ('Q', 'P'))])
+# F := F._unary and G := G._mutual, as Lean compiles well-founded recursion: the helper names nothing of
+# F, yet it is F's body, so a helper reaches the definition it serves. t and u name both.
+hb = Build()
+for owner, helper in (('F', '_unary'), ('G', '_mutual')):
+    hb.define((owner, helper), hb.const('Nat'), hb.expr('natVal', '0'))
+    hb.define(owner, hb.const('Nat'), hb.const(owner, helper))
+for thm, owner, helper in (('t', 'F', '_unary'), ('u', 'G', '_mutual')):
+    hb.theorem(thm, hb.bind('forallE', ('x',), hb.const(owner), hb.const(owner, helper)), INTRO)
+helpers = attempt(hb.env)
+check('sanity: a _unary or _mutual helper reaches the definition it serves',
+      attempt(lambda: sanity.targets(helpers, ['t', 'u'], {'t': ['F', 'F._unary'], 'u': ['G', 'G._mutual']}))
+      == [('t', ()), ('u', ())])
 check("sanity: an argument's explicitness comes from the definition's type, its use from the value, its name from both",
       attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P'])) == T_WANT)
 check('sanity: an assumption is judged only when the rest of the statement does not mention it',

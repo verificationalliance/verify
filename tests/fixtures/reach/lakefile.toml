@@ -1,0 +1,5 @@
+name = "reach"
+defaultTargets = ["Reach"]
+
+[[lean_lib]]
+name = "Reach"

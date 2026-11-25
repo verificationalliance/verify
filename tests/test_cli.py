@@ -22,7 +22,7 @@ NANODA = os.environ.get('NANODA_BIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0/bin/nanoda_bin')
 LEAN_TOOLCHAIN = os.environ.get('LEAN_TOOLCHAIN') or os.path.expanduser(
     '~/.elan/toolchains/leanprover--lean4---v4.36.0')
-MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak', 'printed': 'Printed'}
+MODULES = {'good': 'Good', 'sorry': 'Sorry', 'native': 'Native', 'weak': 'Weak', 'reach': 'Reach', 'printed': 'Printed'}
 REPO, COMMIT = 'github.com/acme/proj', 'c' * 40
 TMP = tempfile.mkdtemp(prefix='test_cli-')
 
@@ -485,6 +485,20 @@ for bad in ('[0,0,["Good","t1"]]\n', '[0,"0",["Good","t1"],["Good","f"]]\n', '[0
     check('sanity helper: a target line %r exits 1, one line on stderr' % bad, h is not None and h.rejected('targets'))
 h = helper(os.path.join(TMP, 'no-such-targets.jsonl'), os.path.join(FIXTURES, 'good.ndjson'))
 check('sanity helper: a file it cannot read exits 1, one line on stderr', h is not None and h.rejected())
+
+# Which definitions the helper is given. The re-check replaces a definition only where the statement
+# names it, so the kernel accepts safe's proof whatever threshold is, though isHigh is made of it, and
+# even_two's whatever odd is, though even is. sanity-targets leaves such a definition out.
+REACH = os.path.join(FIXTURES, 'reach.ndjson')
+r = sanity_targets('reach')
+check('sanity-targets leaves out a definition another constant of the statement reaches, and a mutual block',
+      r.code == 0 and r.err == '' and r.out == '[0,0,["Reach","safe"],["Reach","isHigh"]]\n')
+h = helper(write(fresh('reach-targets.jsonl'), r.raw), REACH)
+check('sanity helper: reach verdicts', h is not None and h.code == 0 and h.err == '' and h.out == '0 0 needed\n')
+h = helper(write(fresh('reach-all.jsonl'), '[0,1,["Reach","safe"],["Reach","threshold"]]\n'
+                                           '[1,1,["Reach","even_two"],["Reach","odd"]]\n'), REACH)
+check('sanity helper: given them, the kernel accepts safe whatever threshold is, and even_two whatever odd is',
+      h is not None and h.code == 0 and h.out == '0 1 any\n1 1 any\n')
 
 
 # The printer: nanoda reads names by splitting them at dots, so a name it would read as another one

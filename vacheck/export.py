@@ -526,6 +526,45 @@ def value_constants(env, name):
     return frozenset(env._render(c) for c in env._constants([d.fields['value']], seen, literals=False))
 
 
+_HELPERS = ('_mutual', '_unary')  # what Lean compiles well-founded recursion through
+
+
+def reaches(env, names, target):
+    """Whether one of `names` reaches `target`, by a path of one step or more. A step goes from a
+    declaration to each constant that its type mentions, and its value unless it is a theorem (a
+    proof changes no meaning); from a member of an inductive block to every other; from a definition
+    to the others of its mutual block (`all`), which Lean compiles to helpers that name none of them;
+    and from a `_mutual` or `_unary` helper to the definition it serves, whose body it holds but does
+    not name. A name the export does not declare takes no step. One that is not a name of the export
+    at all counts as reaching: what it would reach is not known."""
+    goal = env._lookup(target)
+    todo = [env._lookup(n) for n in names]
+    if goal is None or None in todo:
+        return True
+    stepped = set()
+    seen = bytearray(len(env._exprs))  # shared: what one declaration's expressions reach, all reach
+    while todo:
+        c = todo.pop()
+        if c in stepped:
+            continue
+        stepped.add(c)
+        d = env._decls.get(c)
+        nxt = set()
+        if d is not None:
+            nxt = env._constants([d.fields['type']] if d.kind == 'theorem' else d.exprs(), seen, literals=False)
+            if d.block is not None:
+                nxt.update(m['name'] for key, _ in _MEMBERS for m in d.block[key])
+            elif d.kind in ('def', 'opaque'):
+                nxt.update(d.fields['all'])
+        pre, comp = env._parts[c] if c else (0, None)
+        if comp in _HELPERS and pre in env._decls:
+            nxt.add(pre)
+        if goal in nxt:
+            return True
+        todo.extend(nxt - stepped)
+    return False
+
+
 def constructors(env, name):
     """The constructors of the inductive type `name`, in their order; ExportError if it is not one."""
     d = env._decls[env._decl(name)]
