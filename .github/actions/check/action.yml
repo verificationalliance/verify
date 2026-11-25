@@ -123,8 +123,8 @@ runs:
     - name: Get the checker
       shell: bash --noprofile --norc -euo pipefail {0}
       env:
-        VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v2.0.0/vacheck.pyz
-        VACHECK_SHA256: 5eab876cbe529a0bbd9cc5288244dfbabd8141cabdb03133f4c3e43b754f9276
+        VACHECK_URL: https://github.com/verificationalliance/verify/releases/download/v2.0.1/vacheck.pyz
+        VACHECK_SHA256: ec92d8cf02061d74a3a6949949063cd2d1582e4dc757fb343ae15e4b1016d240
       run: |
         va="$RUNNER_TEMP/va"
         mkdir -p "$va"

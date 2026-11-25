@@ -102,6 +102,21 @@ for c in CONSTANTS:
     check('%s is set in both files' % c, c in lean_constants and c in action_constants)
     check('%s has one value in both files' % c, len(set(values)) == 1)
 
+# The checker both files download is the release of this repository's vacheck, at its version.
+sys.path.insert(0, ROOT)
+from vacheck import VERSION  # noqa: E402
+
+
+def other_versions(urls, version):
+    url = 'https://github.com/verificationalliance/verify/releases/download/v%s/vacheck.pyz' % version
+    return [u for u in urls if u != url]
+
+
+URLS = lean_constants.get('VACHECK_URL', []) + action_constants.get('VACHECK_URL', [])
+check('VACHECK_URL is the release of vacheck.VERSION, in both files',
+      len(URLS) == 2 and other_versions(URLS, VERSION) == [])
+check('... another version is found', other_versions(URLS, VERSION + '.1') != [])
+
 uses = [line.strip() for line in lean + action if re.match(r' *(- )?uses: ', line)]
 check('every action is pinned by full SHA, with a version comment',
       bool(uses) and all(PINNED.fullmatch(u) for u in uses))
