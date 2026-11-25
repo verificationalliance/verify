@@ -15,6 +15,10 @@ project's definitions; one whose proof still holds with a definition replaced by
 always true or ignores an argument; an assumption the proof never uses. These are warnings on the report, not
 failures. A warning on a reviewed claim voids the review.
 
+The result also lists each line of your source that uses `implemented_by`, `extern` or `csimp`, which make the
+compiled code differ from the proved definition. Lean adds such attributes to some code it generates itself (the
+`ctorIdx` of a derived enum); those belong to Lean's compiler, which every check trusts, and are not listed.
+
 The kernel check behind "holds whatever it is" tries each pair of a claim and a definition its statement
 names, unless another constant of the statement is made of that definition. The result's `sanity` says how
 far it got: `complete`, every pair it tried has a verdict; `partial`, at least one pair was skipped at a
