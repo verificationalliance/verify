@@ -89,12 +89,11 @@ Pin the workflow by its full commit SHA, as above. The current release:
   Its check job runs the check action `.github/actions/check` of this repository, pinned at
   `e857d7a`, and the export is kept 7 days.
 
-Superseded, still accepted for now: workflow-7 (`ba4c212`, vacheck 1.1.4, schema v1) and workflow-6
-(`6512d67`, vacheck 1.1.4, schema v1). Move to workflow-10.
-
 Revoked: workflow-1 (`f209d20`), workflow-2 (`4e66300`), workflow-3 (`7896c82`), workflow-4
-(`7b47c83`, never used), workflow-5 (`9ade54f`), workflow-8 (`8ebc4dc`, never used) and workflow-9 (`d71d686`, never used). Their tags stay as history; a result one of them signed shows as needing a
-new check until the workflow runs again on the current release.
+(`7b47c83`, never used), workflow-5 (`9ade54f`), workflow-6 (`6512d67`), workflow-7 (`ba4c212`),
+workflow-8 (`8ebc4dc`, never used) and workflow-9 (`d71d686`, never used). Their tags stay as
+history; a result one of them signed shows as needing a new check until the workflow runs again on
+the current release.
 
 Check the parsers locally: `python3 -I tests/test_vacheck.py`
 
