@@ -594,6 +594,134 @@ check('universe_params: sort none, List one',
 check('name_components: a guillemet name',
       attempt(lambda: vx.name_components(G, 'Good.«key never leaves»')) == ('Good', 'key never leaves'))
 
+# The sanity checks: a claim's warnings, from its definitions and the kernel helper's verdicts.
+try:
+    from vacheck import sanity  # noqa: E402
+except ImportError as e:
+    print('      cannot import vacheck.sanity: %s' % e)
+    sanity = None
+
+
+def raises(fn, exc):
+    try:
+        fn()
+    except exc:
+        return True
+    return False
+
+
+# DEFS is each claim's definitions as analyze computes them; ANY is the helper's verdicts (Task 3).
+DEFS = {'Weak.prog_safe': ['Weak.Safe', 'Weak.prog'], 'Weak.sort_example': ['Weak.Sorted', 'Weak.sort'],
+        'Weak.add_zero_of_valid': ['Weak.Valid'], 'Weak.sort_length_self': ['Weak.sort'],
+        'Weak.vacuous': ['Weak.sort'], 'Weak.no_project': [], 'Weak.arrow': ['Weak.Valid'], 'Weak.by_lemma': []}
+ANY = {'Weak.prog_safe': {'Weak.prog'}, 'Weak.add_zero_of_valid': {'Weak.Valid'},
+       'Weak.sort_length_self': {'Weak.sort'}, 'Weak.vacuous': {'Weak.sort'}, 'Weak.arrow': {'Weak.Valid'}}
+WANT = {'Weak.prog_safe': [('holds-for-any', 'Weak.prog', None), ('always-true', 'Weak.Safe', None)],
+        'Weak.sort_example': [],
+        'Weak.add_zero_of_valid': [('holds-for-any', 'Weak.Valid', None), ('unused-assumption', 'h', None)],
+        'Weak.sort_length_self': [('holds-for-any', 'Weak.sort', None)],
+        'Weak.vacuous': [('holds-for-any', 'Weak.sort', None)],
+        'Weak.no_project': [('no-project-definition', None, None)],
+        'Weak.arrow': [('holds-for-any', 'Weak.Valid', None), ('unused-assumption', None, None)],
+        'Weak.by_lemma': [('no-project-definition', None, None)]}
+
+
+def got(t, any_=None, env=None, defs=None):
+    """The warnings of theorem t as (check, name, arg): weak's, unless env and defs are given."""
+    ws = sanity.warnings(W if env is None else env, t, DEFS[t] if defs is None else defs,
+                         ANY.get(t, set()) if any_ is None else any_)
+    if not all(type(w) is dict and list(w) == ['check', 'name', 'arg'] for w in ws):
+        print('      not {check, name, arg}: %r' % ws)
+        return None
+    return [(w['check'], w['name'], w['arg']) for w in ws]
+
+
+def weak_warnings():
+    out = {t: got(t) for t in WANT}
+    for t in WANT:
+        if out[t] != WANT[t]:
+            print('      %s: %r' % (t, out[t]))
+    return out
+
+
+check('sanity: the warnings of each weak claim', attempt(weak_warnings) == WANT)
+check("sanity: no holds-for-any without the kernel's verdict",
+      attempt(lambda: got('Weak.prog_safe', set())) == [('always-true', 'Weak.Safe', None)])
+check('sanity: a verdict for a definition the statement does not mention is an error',
+      attempt(lambda: raises(lambda: sanity.warnings(W, 'Weak.no_project', [], {'Weak.sort'}), sanity.SanityError))
+      is True)
+check('sanity: targets keep monomorphic defs, in order',
+      attempt(lambda: sanity.targets(G, ['Good.anyIn_nil'], {'Good.anyIn_nil': ['Good.Range', 'Good.anyIn']}))
+      == [('Good.anyIn_nil', ('Good.anyIn',))])
+# P (n : Nat) {m : Nat} : Prop := False ignores n, but m is not explicit; Q : Nat → Prop := fun x => False
+# ignores an argument with macro scopes (x._@.M._hyg.1); U.{u} : Sort u has a universe parameter. The proof
+# of t (a : Nat) {b : Nat} : Q a, fun a b => True.intro, uses neither a nor b, though the statement uses a.
+SHAPES = [META] + ['{"in":%d,"str":{"pre":%d,"str":"%s"}}' % (i + 1, pre, s) for i, (pre, s) in enumerate(
+    [(0, 'True'), (1, 'intro'), (0, 'False'), (0, 'Nat'), (0, 'P'), (0, 'Q'), (0, 'U'), (0, 't'), (0, 'n'),
+     (0, 'm'), (0, 'a'), (0, 'b'), (0, 'x'), (13, '_@'), (14, 'M'), (15, '_hyg')])] + [
+    '{"in":17,"num":{"pre":16,"i":1}}', '{"in":18,"str":{"pre":0,"str":"u"}}', '{"il":1,"param":18}', SORT,
+    '{"ie":1,"const":{"name":1,"us":[]}}', '{"ie":2,"const":{"name":2,"us":[]}}',
+    '{"ie":3,"const":{"name":3,"us":[]}}', '{"ie":4,"const":{"name":4,"us":[]}}',
+    '{"ie":5,"const":{"name":6,"us":[]}}', '{"ie":6,"bvar":1}',
+    '{"ie":7,"forallE":{"name":10,"type":4,"body":0,"binderInfo":"implicit"}}',
+    '{"ie":8,"forallE":{"name":9,"type":4,"body":7,"binderInfo":"default"}}',
+    '{"ie":9,"lam":{"name":10,"type":4,"body":3,"binderInfo":"implicit"}}',
+    '{"ie":10,"lam":{"name":9,"type":4,"body":9,"binderInfo":"default"}}',
+    '{"ie":11,"forallE":{"name":17,"type":4,"body":0,"binderInfo":"default"}}',
+    '{"ie":12,"lam":{"name":17,"type":4,"body":3,"binderInfo":"default"}}', '{"ie":13,"sort":1}',
+    '{"ie":14,"app":{"fn":5,"arg":6}}', '{"ie":15,"forallE":{"name":12,"type":4,"body":14,"binderInfo":"implicit"}}',
+    '{"ie":16,"forallE":{"name":11,"type":4,"body":15,"binderInfo":"default"}}',
+    '{"ie":17,"lam":{"name":12,"type":4,"body":2,"binderInfo":"implicit"}}',
+    '{"ie":18,"lam":{"name":11,"type":4,"body":17,"binderInfo":"default"}}'] + [
+    '{"def":{"name":%d,"levelParams":%s,"type":%d,"value":%d,"hints":"abbrev","safety":"safe","all":[%d]}}'
+    % (n, ps, t, v, n) for n, ps, t, v in ((5, '[]', 8, 10), (6, '[]', 11, 12), (7, '[18]', 13, 1))] + [
+    '{"thm":{"name":8,"levelParams":[],"type":16,"value":18,"all":[8]}}']
+shapes = attempt(lambda: vx.load_export(export_file(SHAPES)))
+check('sanity: targets drop a definition with universe parameters, and a name that is not a def',
+      attempt(lambda: sanity.targets(shapes, ['t'], {'t': ['Q', 'U', 'P', 'Nat']})) == [('t', ('Q', 'P'))])
+check('sanity: ignores-argument and unused-assumption judge explicit binders by the proof, in order',
+      attempt(lambda: got('t', {'P'}, shapes, ['Q', 'U', 'P']))
+      == [('holds-for-any', 'P', None), ('ignores-argument', 'Q', None), ('ignores-argument', 'P', 'n'),
+          ('unused-assumption', 'a', None)])
+
+
+def props_export(n):
+    """Definitions d0 ... d(n-1), each `: Prop := True`, and a theorem t whose statement is d0 d1 ... d(n-1)."""
+    lines = [META, '{"in":1,"str":{"pre":0,"str":"True"}}', '{"in":2,"str":{"pre":0,"str":"t"}}']
+    lines += ['{"in":%d,"str":{"pre":0,"str":"d%d"}}' % (i + 3, i) for i in range(n)]
+    lines += [SORT, '{"ie":1,"const":{"name":1,"us":[]}}']
+    lines += ['{"ie":%d,"const":{"name":%d,"us":[]}}' % (i + 2, i + 3) for i in range(n)]
+    lines += ['{"ie":%d,"app":{"fn":%d,"arg":%d}}' % (n + 1 + i, 2 if i == 1 else n + i, i + 2) for i in range(1, n)]
+    lines += ['{"def":{"name":%d,"levelParams":[],"type":0,"value":1,"hints":"abbrev","safety":"safe","all":[%d]}}'
+              % (i + 3, i + 3) for i in range(n)]
+    lines.append('{"thm":{"name":2,"levelParams":[],"type":%d,"value":1,"all":[2]}}' % (2 * n))
+    return lines
+
+
+props = attempt(lambda: vx.load_export(export_file(props_export(11))))
+D11 = ['d%d' % i for i in reversed(range(11))]  # the order of defs, not of the names
+check('sanity: at most 10 warnings',
+      attempt(lambda: vx.constants_in_type(props, 't') == set(D11) and got('t', set(), props, D11)
+              == [('always-true', d, None) for d in D11[:10]]) is True)
+check('sanity: the cap keeps the most serious first',
+      attempt(lambda: got('t', {'d0'}, props, D11))
+      == [('holds-for-any', 'd0', None)] + [('always-true', d, None) for d in D11[:9]])
+
+T2 = [('A.t', ('A.f', 'A.g')), ('A.u', ()), ('A.v', ('A.h',))]
+check('read_verdicts: one line per pair',
+      attempt(lambda: sanity.read_verdicts('0 0 any\n0 1 needed\n2 0 skipped\n', T2))
+      == {'A.t': frozenset({'A.f'}), 'A.u': frozenset(), 'A.v': frozenset()})
+check('read_verdicts: no pairs, no lines',
+      attempt(lambda: sanity.read_verdicts('', [('A.u', ())])) == {'A.u': frozenset()}
+      and attempt(lambda: raises(lambda: sanity.read_verdicts('\n', [('A.u', ())]), sanity.SanityError)) is True)
+for bad in ('0 0 any\n2 0 any\n', '0 0 any\n0 1 any\n2 0 any\n2 0 any\n', '0 1 any\n0 0 any\n2 0 any\n',
+            '0 0 maybe\n0 1 any\n2 0 any\n', '0 0 any\n0 1 any\n2 0 any', '0 0 any\n0 1 any\n2 0 any\n3 0 any\n',
+            '00 0 any\n0 1 any\n2 0 any\n', '0 0 any\r\n0 1 any\n2 0 any\n', '0 0 any \n0 1 any\n2 0 any\n',
+            '0  0 any\n0 1 any\n2 0 any\n', '٠ 0 any\n0 1 any\n2 0 any\n', '0 0 ANY\n0 1 any\n2 0 any\n',
+            b'0 0 any\n0 1 any\n2 0 any\n', '0 0 any\n0 1 any\n', ''):
+    check('read_verdicts: rejected %r' % bad,
+          attempt(lambda: raises(lambda: sanity.read_verdicts(bad, T2), sanity.SanityError)) is True)
+
 # Supported toolchains.
 try:
     from vacheck import toolchain as vt  # noqa: E402
