@@ -389,12 +389,17 @@ def string_literal_export():
     write(os.path.join(d, 'StrLit.lean'),
           'def greeting : String := "abc"\ntheorem t : greeting ++ "def" = "abcdef" := by decide\n')
     out = os.path.join(d, 'strlit.ndjson')
+    # Without LEAN_SYSROOT, leanexport asks the `lean` on PATH where the toolchain is.
+    env = dict(os.environ, LEAN_PATH=d, LEAN_SYSROOT=LEAN_TOOLCHAIN, LEAN_ABORT_ON_PANIC='1')
     for argv, stdout in (([os.path.join(LEAN_TOOLCHAIN, 'bin', 'lean'), '-o', 'StrLit.olean', 'StrLit.lean'], None),
                          ([os.path.join(LEAN_TOOLCHAIN, 'bin', 'leanexport'), 'StrLit', '--', 't'], out)):
         with open(stdout or os.devnull, 'wb') as f:
             p = attempt(lambda: subprocess.run(argv, cwd=d, stdout=f, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                               env=dict(os.environ, LEAN_PATH=d, LEAN_ABORT_ON_PANIC='1')))
+                                               env=env))
         if p is None or p.returncode != 0:
+            if p is not None:
+                print('      %s exits %d: %s' % (os.path.basename(argv[0]), p.returncode,
+                                                 p.stderr.decode('utf-8', errors='replace')[-2000:]))
             return None
     return out
 
