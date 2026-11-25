@@ -59,7 +59,8 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     a list of such exports, one per library of the toolchain: a name is the library's when any of
     them declares it, and must then be identical to every one that does.
     `source_dir` is the checkout, and `manifest_path` the manifest file's path inside it.
-    `verdicts` is what the sanity helper printed for sanity.targets of the claims (sanity.read_verdicts).
+    `verdicts` is what the sanity helper printed for sanity.targets of the claims (sanity.read_verdicts),
+    or None when the check job stopped the helper, or it crashed: then no pair has a verdict.
     """
     references = list(reference) if isinstance(reference, (list, tuple)) else [reference]
     theorems = [c.theorem for c in manifest.claims]
@@ -102,7 +103,8 @@ def analyze(export, reference, manifest, source_dir, repo, commit, toolchain, ke
     except ExportError as e:
         raise AnalysisError('the export cannot be read: %s' % e) from None
     try:
-        holds_for_any = sanity.read_verdicts(verdicts, pairs)
+        holds_for_any = ({t: frozenset() for t in theorems} if verdicts is None
+                         else sanity.read_verdicts(verdicts, pairs))
     except sanity.SanityError as e:
         raise AnalysisError("the sanity helper's verdicts cannot be read: %s" % e) from None
 

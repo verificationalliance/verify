@@ -209,10 +209,13 @@ def skipped(case, root):
     return write(fresh('verdicts'), ''.join('%d %d skipped\n' % (i, j) for i, j in pairs))
 
 
-def analyze(case, claims=(), root=None, nanoda=NANODA, toolchain='v4.36.0', verdicts=None, abstracted=True):
-    """vacheck analyze on the fixture, with the verdict file given, or skipped's."""
+def analyze(case, claims=(), root=None, nanoda=NANODA, toolchain='v4.36.0', verdicts=None, abstracted=True,
+            stopped=False):
+    """vacheck analyze on the fixture, with the verdict file given, or skipped's; and --sanity-stopped if
+    stopped."""
     root = root or tree(case, claims)
     more = ['--abstracted', verdicts or skipped(case, root)] if abstracted else []
+    more += ['--sanity-stopped'] if stopped else []
     return cli('analyze', '--export', os.path.join(FIXTURES, case + '.ndjson'), '--reference', REFS[case],
                '--manifest', os.path.join(root, '.verificationalliance.json'), '--source', root,
                '--repo', REPO, '--commit', COMMIT, '--toolchain', toolchain, '--kernels', 'lean,nanoda',
@@ -441,6 +444,15 @@ check('analyze rejects a verdict file missing a line',
       analyze('good', fixture_claims('good'), verdicts=short).rejected("the sanity helper's verdicts cannot be read"))
 r = analyze('good', fixture_claims('good'), abstracted=False)
 check('analyze needs --abstracted', r.code == 2 and r.out == '' and r.one_line() and '--abstracted' in r.err)
+# A helper stopped by the check job's limits, or crashed, gives no verdict: every pair is skipped, and
+# the check stands on the rest.
+r = analyze('good', fixture_claims('good'), abstracted=False, stopped=True)
+all_skipped = analyze('good', fixture_claims('good'))
+check('analyze --sanity-stopped reads a stopped helper as every pair skipped',
+      r.code == 0 and r.err == '' and r.out == all_skipped.out and all_skipped.code == 0
+      and warnings_of(r) == {t: [] for _, t, _ in fixture_claims('good')})
+r = analyze('good', fixture_claims('good'), stopped=True)
+check('analyze takes --abstracted or --sanity-stopped, not both', r.code == 2 and r.out == '' and r.one_line())
 v1 = result_of(good_warned)
 v1['schema'] = 'https://verificationalliance.org/attestations/proof-check/v1'
 check('validate rejects a v1 result',
